@@ -52,6 +52,8 @@ xray-admin
 0. 退出
 ```
 
+常用命令、重启、日志、订阅自检和备份说明见 [`docs/operations.md`](docs/operations.md)。
+
 ## 规则怎么改
 
 VPS 只保存一份公共规则 `/etc/xray-sub/rules.yaml`，随订阅下发：
@@ -102,6 +104,7 @@ xray-admin
 | `generate-flclash-profile.ps1` | 备选：把节点直接合并进已有 FlClash 配置 |
 | `check-vps.sh` | 只读环境检查 |
 | `probe-targets.sh` | 只读目标站检测 |
+| `docs/operations.md` | 订阅查询、服务重启、日志、备份、额度等常用命令 |
 | `docs/` | 订阅、部署、执行方式说明 |
 | `tests/` | 本地与容器测试 |
 
