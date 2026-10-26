@@ -1,0 +1,102 @@
+# 通用分流模板（会随仓库公开）
+#
+# 这里只放通用的公共域名/IP 段，不要写自己的设备、内网或 VPS 地址。
+# 你需要私有的规则，写到 /etc/xray-sub/rules.local.yaml，那份文件不会进仓库。
+#
+# 用法：
+#   - 每行一条规则，必须以 "- " 开头
+#   - 以 # 开头的行是注释
+#   - 改完执行 xray-sub 重新生成订阅
+#
+# 顺序很重要：私有规则最先匹配，然后是这份模板，从上到下，第一条命中即生效。
+
+# ---------- 内网通用网段：直连 ----------
+- IP-CIDR,0.0.0.0/8,DIRECT,no-resolve
+- IP-CIDR,10.0.0.0/8,DIRECT,no-resolve
+- IP-CIDR,100.64.0.0/10,DIRECT,no-resolve
+- IP-CIDR,127.0.0.0/8,DIRECT,no-resolve
+- IP-CIDR,169.254.0.0/16,DIRECT,no-resolve
+- IP-CIDR,172.16.0.0/12,DIRECT,no-resolve
+- IP-CIDR,192.168.0.0/16,DIRECT,no-resolve
+- IP-CIDR,198.18.0.0/16,DIRECT,no-resolve
+- IP-CIDR,224.0.0.0/4,DIRECT,no-resolve
+- IP-CIDR6,::1/128,DIRECT,no-resolve
+- IP-CIDR6,fc00::/7,DIRECT,no-resolve
+- IP-CIDR6,fe80::/10,DIRECT,no-resolve
+- DOMAIN-SUFFIX,local,DIRECT
+- DOMAIN-SUFFIX,localhost,DIRECT
+- DOMAIN-SUFFIX,home.arpa,DIRECT
+
+# ---------- 路由器管理页：直连 ----------
+- DOMAIN,instant.arubanetworks.com,DIRECT
+- DOMAIN,setmeup.arubanetworks.com,DIRECT
+- DOMAIN,router.asus.com,DIRECT
+- DOMAIN-SUFFIX,hiwifi.com,DIRECT
+- DOMAIN-SUFFIX,miwifi.com,DIRECT
+- DOMAIN-SUFFIX,tplogin.cn,DIRECT
+- DOMAIN-SUFFIX,tendawifi.com,DIRECT
+- DOMAIN-SUFFIX,wifi.cmcc,DIRECT
+
+# ---------- AI 服务：走代理 ----------
+- DOMAIN-KEYWORD,anthropic,PROXY
+- DOMAIN-KEYWORD,claude,PROXY
+- DOMAIN-KEYWORD,openai,PROXY
+- DOMAIN-SUFFIX,anthropic.com,PROXY
+- DOMAIN-SUFFIX,chatgpt.com,PROXY
+- DOMAIN-SUFFIX,claude.ai,PROXY
+- DOMAIN-SUFFIX,claude.com,PROXY
+- DOMAIN-SUFFIX,cursor.com,PROXY
+- DOMAIN-SUFFIX,gemini.google.com,PROXY
+- DOMAIN-SUFFIX,generativelanguage.googleapis.com,PROXY
+- DOMAIN-SUFFIX,githubcopilot.com,PROXY
+- DOMAIN-SUFFIX,openai.com,PROXY
+- DOMAIN-SUFFIX,perplexity.ai,PROXY
+- DOMAIN-SUFFIX,x.ai,PROXY
+
+# ---------- 常用开发与内容站：走代理 ----------
+- DOMAIN-SUFFIX,github.com,PROXY
+- DOMAIN-SUFFIX,githubusercontent.com,PROXY
+- DOMAIN-SUFFIX,githubassets.com,PROXY
+- DOMAIN-SUFFIX,gitlab.com,PROXY
+- DOMAIN-SUFFIX,google.com,PROXY
+- DOMAIN-SUFFIX,googleapis.com,PROXY
+- DOMAIN-SUFFIX,gstatic.com,PROXY
+- DOMAIN-SUFFIX,youtube.com,PROXY
+- DOMAIN-SUFFIX,youtu.be,PROXY
+- DOMAIN-SUFFIX,googlevideo.com,PROXY
+- DOMAIN-SUFFIX,ytimg.com,PROXY
+- DOMAIN-SUFFIX,twitter.com,PROXY
+- DOMAIN-SUFFIX,x.com,PROXY
+- DOMAIN-SUFFIX,reddit.com,PROXY
+- DOMAIN-SUFFIX,telegram.org,PROXY
+- DOMAIN-SUFFIX,t.me,PROXY
+- DOMAIN-SUFFIX,wikipedia.org,PROXY
+- DOMAIN-SUFFIX,notion.so,PROXY
+- DOMAIN-SUFFIX,linkedin.com,PROXY
+- DOMAIN-SUFFIX,medium.com,PROXY
+- DOMAIN-SUFFIX,stackoverflow.com,PROXY
+- DOMAIN-SUFFIX,npmjs.org,PROXY
+- DOMAIN-SUFFIX,pypi.org,PROXY
+- DOMAIN-SUFFIX,docker.io,PROXY
+- DOMAIN-SUFFIX,huggingface.co,PROXY
+
+# ---------- 国内常用服务：直连 ----------
+- DOMAIN-SUFFIX,qq.com,DIRECT
+- DOMAIN-SUFFIX,weixin.com,DIRECT
+- DOMAIN-SUFFIX,taobao.com,DIRECT
+- DOMAIN-SUFFIX,tmall.com,DIRECT
+- DOMAIN-SUFFIX,jd.com,DIRECT
+- DOMAIN-SUFFIX,aliyun.com,DIRECT
+- DOMAIN-SUFFIX,aliyuncs.com,DIRECT
+- DOMAIN-SUFFIX,baidu.com,DIRECT
+- DOMAIN-SUFFIX,bilibili.com,DIRECT
+- DOMAIN-SUFFIX,hdslb.com,DIRECT
+- DOMAIN-SUFFIX,douyin.com,DIRECT
+- DOMAIN-SUFFIX,zhihu.com,DIRECT
+- DOMAIN-SUFFIX,xiaohongshu.com,DIRECT
+- DOMAIN-SUFFIX,163.com,DIRECT
+- DOMAIN-SUFFIX,126.net,DIRECT
+
+# ---------- 兜底 ----------
+- GEOIP,CN,DIRECT,no-resolve
+- MATCH,PROXY

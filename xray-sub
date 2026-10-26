@@ -1,0 +1,128 @@
+#!/usr/bin/env bash
+# Rebuild the Clash/FlClash subscription from the editable rules template.
+# Files:
+#   /etc/xray-sub/token       random URL path segment
+#   /etc/xray-sub/rules.yaml  rule entries, one per line, each starting with "- "
+#   /srv/sub/<token>/config.yaml  generated (served over HTTP)
+set -Eeuo pipefail
+umask 027
+
+STATE=/usr/local/etc/xray/client.json
+RULES=/etc/xray-sub/rules.yaml
+RULES_LOCAL=/etc/xray-sub/rules.local.yaml
+TOKEN_FILE=/etc/xray-sub/token
+SUB_PORT_FILE=/etc/xray-sub/port
+WEBROOT=/srv/sub
+
+die() { printf 'ERROR: %s\n' "$*" >&2; exit 1; }
+
+[[ -f $STATE ]] || die "缺少 $STATE，请先安装 Xray"
+[[ -f $RULES ]] || die "缺少 $RULES"
+[[ -s $TOKEN_FILE ]] || die "缺少 $TOKEN_FILE"
+
+TOKEN=$(tr -d '\r\n' < "$TOKEN_FILE")
+[[ $TOKEN =~ ^[A-Za-z0-9_-]{16,64}$ ]] || die '订阅令牌格式不正确'
+
+# Validate every meaningful line is a rule entry. Fail closed: a malformed
+# template must not silently produce a config that routes everything direct.
+validate_rules() {
+  local file="$1" label="$2" line_no=0 bad=0 line
+  [[ -f $file ]] || return 0
+  while IFS= read -r line || [[ -n $line ]]; do
+    line_no=$((line_no + 1))
+    case $line in
+      ''|\#*) continue ;;
+      '- '*) ;;
+      *) printf '%s 第 %d 行不是规则条目（应以 "- " 开头）：%s\n' "$label" "$line_no" "$line" >&2; bad=1 ;;
+    esac
+  done < "$file"
+  ((bad == 0)) || die '规则校验失败，未生成订阅'
+  return 0
+}
+validate_rules "$RULES" '通用规则'
+# Optional private rules; never shipped with the repo.
+[[ -f $RULES_LOCAL ]] && validate_rules "$RULES_LOCAL" '私有规则'
+
+uuid=$(jq -er .uuid "$STATE")
+pub=$(jq -er .public_key "$STATE")
+sid=$(jq -er .short_id "$STATE")
+server=$(jq -er .server "$STATE")
+port=$(jq -er .port "$STATE")
+sni=$(jq -er .server_name "$STATE")
+
+out_dir="$WEBROOT/$TOKEN"
+install -d -m 755 "$WEBROOT" "$out_dir"
+tmp=$(mktemp "$out_dir/.config.XXXXXX")
+trap 'rm -f "$tmp"' EXIT
+
+{
+  cat <<EOF
+mixed-port: 7890
+allow-lan: false
+mode: rule
+log-level: warning
+ipv6: false
+unified-delay: true
+tcp-concurrent: true
+find-process-mode: "off"
+global-client-fingerprint: chrome
+
+dns:
+  enable: true
+  ipv6: false
+  enhanced-mode: fake-ip
+  fake-ip-range: 198.18.0.1/16
+  nameserver:
+    - https://223.5.5.5/dns-query
+    - https://1.1.1.1/dns-query
+  fallback:
+    - https://8.8.8.8/dns-query
+
+proxies:
+  - name: "Personal-VPS"
+    type: vless
+    server: "$server"
+    port: $port
+    uuid: "$uuid"
+    network: tcp
+    tls: true
+    udp: true
+    flow: xtls-rprx-vision
+    client-fingerprint: chrome
+    servername: "$sni"
+    reality-opts:
+      public-key: "$pub"
+      short-id: "$sid"
+
+proxy-groups:
+  - name: "PROXY"
+    type: select
+    proxies:
+      - "Personal-VPS"
+      - DIRECT
+
+rules:
+EOF
+  # Private rules first: they must win over the generic template and MATCH.
+  if [[ -f $RULES_LOCAL ]]; then
+    grep -v '^[[:space:]]*#' "$RULES_LOCAL" | grep -v '^[[:space:]]*$' || true
+  fi
+  cat "$RULES"
+} > "$tmp"
+
+# Sanity: generated file must contain the node and at least one rule.
+grep -q 'Personal-VPS' "$tmp" || die '生成的订阅缺少节点'
+grep -q '^  - \|^- ' "$tmp" || die '生成的订阅缺少规则'
+[[ $(wc -c < "$tmp") -gt 200 ]] || die '生成的订阅过小'
+
+chmod 644 "$tmp"
+mv -f "$tmp" "$out_dir/config.yaml"
+chmod 644 "$out_dir/config.yaml"
+
+sub_port=$(tr -d '\r\n' < "$SUB_PORT_FILE" 2>/dev/null || echo "")
+sub_port=${sub_port:-2096}
+echo "订阅文件已生成：$out_dir/config.yaml"
+rules_count=$(grep -c '^- ' "$WEBROOT/$TOKEN/config.yaml" 2>/dev/null || echo 0)
+echo "规则条数：${rules_count}"
+[[ -f $RULES_LOCAL ]] && echo "已合并私有规则：$RULES_LOCAL"
+echo "本地地址：http://127.0.0.1:${sub_port}/${TOKEN}/config.yaml"

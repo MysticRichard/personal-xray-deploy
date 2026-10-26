@@ -1,0 +1,24 @@
+[Unit]
+Description=Personal Clash subscription (static)
+After=network.target
+StartLimitIntervalSec=120
+StartLimitBurst=10
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/busybox httpd -f -p 127.0.0.1:__SUB_PORT__ -h /srv/sub
+Restart=always
+RestartSec=5
+DynamicUser=yes
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+ReadOnlyPaths=/srv/sub
+NoNewPrivileges=true
+CapabilityBoundingSet=
+UMask=0027
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

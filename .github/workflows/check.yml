@@ -1,0 +1,29 @@
+name: Check deployment scripts
+on:
+  push:
+  pull_request:
+permissions:
+  contents: read
+jobs:
+  shell:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: |
+          bash -n one-click.sh
+          bash -n install-xray.sh
+          bash -n xray-admin
+          bash tests/test-preflight-http.sh
+          bash tests/test-server.sh
+  profile:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Test rules preservation and input validation
+        shell: powershell
+        run: ./tests/test-generate-flclash-profile.ps1
+      - name: Verify generated single-file installer is up to date
+        shell: powershell
+        run: |
+          ./build-one-click.ps1
+          git diff --exit-code -- one-click.sh

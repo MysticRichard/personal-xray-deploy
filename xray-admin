@@ -1,0 +1,149 @@
+#!/usr/bin/env bash
+set -Eeuo pipefail
+umask 077
+[[ $EUID -eq 0 ]] || { echo '请用 root 执行'; exit 1; }
+state=/usr/local/etc/xray/client.json
+sub_token_file=/etc/xray-sub/token
+sub_port_file=/etc/xray-sub/port
+sub_rules=/etc/xray-sub/rules.yaml
+
+sub_url() {
+  [[ -f $state && -s $sub_token_file ]] || { echo '尚未配置订阅'; return 1; }
+  local server public port token
+  server=$(jq -er .server "$state")
+  port=$(jq -er .port "$state")
+  token=$(tr -d '\r\n' < "$sub_token_file")
+  # Subscription port: prefer the stored value; it is published on localhost only.
+  local sport publicp
+  sport=$(tr -d '\r\n' < "$sub_port_file" 2>/dev/null || echo 2096)
+  publicp=$(tr -d '\r\n' < /etc/xray-sub/public_port 2>/dev/null || echo "$sport")
+  printf 'http://%s:%s/%s/config.yaml\n' "$server" "${SUB_PUBLIC_PORT:-$publicp}" "$token"
+}
+
+show_sub() {
+  echo
+  echo '订阅地址（复制到 FlClash 订阅栏）：'
+  sub_url || return 1
+  echo
+  echo "规则文件：$sub_rules"
+  if [[ -f $sub_rules ]]; then
+    printf '规则条数：%s\n' "$(grep -c '^- ' "$sub_rules" || true)"
+  fi
+  systemctl is-active --quiet xray-sub && echo '订阅服务：运行中' || echo '订阅服务：未运行'
+}
+
+export_node() {
+  [[ -f $state ]] || { echo '找不到安装状态文件'; return 1; }
+  install -d -m 700 /root/xray-client
+  jq '{proxies:[{name:"Personal-VPS",type:"vless",server:.server,port:.port,uuid:.uuid,network:"tcp",tls:true,udp:true,flow:"xtls-rprx-vision","client-fingerprint":"chrome",servername:.server_name,"reality-opts":{"public-key":.public_key,"short-id":.short_id}}]}' "$state" > /root/xray-client/node.json
+  chmod 600 /root/xray-client/node.json
+  echo '已导出 /root/xray-client/node.json'
+}
+
+edit_rules() {
+  local target="${1:-$sub_rules}"
+  local backup="/root/xray-sub-rules-$(date -u +%Y%m%dT%H%M%SZ)-$(basename "$target")"
+  [[ -f $target ]] || {
+    echo "文件不存在：$target"
+    return 1
+  }
+  cp -p "$target" "$backup"
+  chmod 600 "$backup"
+  echo "已备份到 $backup"
+  "${EDITOR:-nano}" "$target" || { echo '编辑器退出异常'; return 1; }
+  if /usr/local/sbin/xray-sub; then
+    echo '已重新生成订阅，FlClash 里下拉刷新即可'
+  else
+    echo '生成失败，正在回滚'
+    cp -p "$backup" "$target"
+    return 1
+  fi
+}
+
+init_local_rules() {
+  [[ -f $sub_rules ]] || { echo '通用规则文件不存在，请先安装'; return 1; }
+  local target=/etc/xray-sub/rules.local.yaml
+  if [[ -f $target ]]; then
+    echo "私有规则文件已存在：$target"
+  else
+    cat > "$target" <<'EOF'
+# 私有分流规则（不会进入公开仓库）
+# 每行一条，"- " 开头；这些规则会排在通用规则之前，优先生效。
+# 示例：
+# - DOMAIN,your-device.example.net,DIRECT
+# - IP-CIDR,203.0.113.10/32,DIRECT,no-resolve
+EOF
+    chmod 640 "$target"
+    echo "已创建：$target"
+  fi
+  echo '编辑后执行 xray-sub 重新生成订阅'
+}
+
+backup_all() {
+  local file=/root/xray-backup-$(date -u +%Y%m%dT%H%M%SZ).tar.gz
+  local paths=(usr/local/etc/xray usr/local/sbin/xray-admin usr/local/sbin/xray-sub etc/xray-sub etc/systemd/system/xray.service etc/systemd/system/xray-sub.service usr/local/bin/xray usr/local/share/xray/geoip.dat srv/sub)
+  local existing=()
+  for p in "${paths[@]}"; do [[ -e /$p ]] && existing+=("$p"); done
+  tar -czf "$file" -C / "${existing[@]}"
+  chmod 600 "$file"
+  echo "备份：$file"
+  echo '请下载到自己电脑，重装会删除服务器内备份'
+}
+
+check_config() { XRAY_LOCATION_ASSET=/usr/local/share/xray /usr/local/bin/xray run -test -config /usr/local/etc/xray/config.json; }
+
+change_sub_port() {
+  local current
+  current=$(tr -d '\r\n' </etc/xray-sub/public_port 2>/dev/null || echo 2096)
+  echo "当前订阅公网端口：$current"
+  echo '只改对外显示的端口，实例内部仍监听 2096，不会动平台映射。'
+  local new
+  read -r -p '新的订阅公网端口（回车保持不变）: ' new
+  if [[ -z $new ]]; then echo '未修改'; return 0; fi
+  [[ $new =~ ^[1-9][0-9]{0,4}$ ]] || { echo '端口格式不正确'; return 1; }
+  ((10#$new <= 65535)) || { echo '端口超出范围'; return 1; }
+  printf '%s\n' "$new" > /etc/xray-sub/public_port
+  echo "已保存。新的订阅地址："
+  sub_url
+}
+
+case ${1:-} in
+  --export) export_node; exit;;
+  --sub) show_sub; exit;;
+esac
+
+while true; do
+  cat <<'MENU'
+
+个人 Xray 管理
+  1. 状态、端口与内存
+  2. 最近日志
+  3. 检查配置并重启
+  4. 查看订阅地址
+  5. 编辑通用规则（rules.yaml）
+  6. 编辑私有规则（rules.local.yaml）
+  7. 重新生成订阅
+  8. 修改订阅公网端口
+  9. 备份
+ 10. 导出客户端节点
+  0. 退出
+MENU
+  read -r -p '选择: ' option || exit 0
+  case $option in
+    1) systemctl --no-pager --full status xray || true
+       ss -lntp | grep -E ':2082|:2096' || ss -lntp
+       systemctl show xray -p MemoryCurrent -p MemoryMax 2>/dev/null || true
+       free -m;;
+    2) journalctl -u xray -n 40 --no-pager;;
+    3) if check_config; then systemctl restart xray; sleep 2; systemctl is-active xray; fi;;
+    4) show_sub;;
+    5) edit_rules "$sub_rules";;
+    6) init_local_rules; edit_rules /etc/xray-sub/rules.local.yaml;;
+    7) /usr/local/sbin/xray-sub && echo '已重新生成，FlClash 下拉刷新即可';;
+    8) change_sub_port;;
+    9) backup_all;;
+    10) export_node;;
+    0) exit 0;;
+    *) echo '无效选项';;
+  esac
+done

@@ -1,0 +1,18 @@
+# Generated archives and private instance data
+*.zip
+*.zip.sha256
+*.tar.gz
+*.log
+.env
+*.env
+client.json
+node.json
+node.yaml
+flclash*.yaml
+xray-personal.yaml
+config.json
+private-backups/
+node_modules/
+# Test outputs (fixtures are created/deleted by tests)
+tests/out*.yaml
+tests/fixture.yaml
