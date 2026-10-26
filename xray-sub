@@ -12,6 +12,7 @@ RULES=/etc/xray-sub/rules.yaml
 RULES_LOCAL=/etc/xray-sub/rules.local.yaml
 TOKEN_FILE=/etc/xray-sub/token
 SUB_PORT_FILE=/etc/xray-sub/port
+USERINFO=/etc/xray-sub/userinfo
 WEBROOT=/srv/sub
 
 die() { printf 'ERROR: %s\n' "$*" >&2; exit 1; }
@@ -119,10 +120,27 @@ chmod 644 "$tmp"
 mv -f "$tmp" "$out_dir/config.yaml"
 chmod 644 "$out_dir/config.yaml"
 
+# Clash-family clients read the traffic quota from a response header, and
+# busybox httpd only executes CGI under a "cgi-bin" directory. So the token
+# lives in the CGI filename, not in the directory name.
+install -d -m 755 "$WEBROOT/cgi-bin"
+cat > "$WEBROOT/cgi-bin/$TOKEN" <<CGI
+#!/bin/sh
+# Subscription for token $TOKEN: quota headers + config body.
+set -eu
+printf 'Content-Type: text/yaml; charset=utf-8\r\n'
+if [ -s "$USERINFO" ]; then
+  printf 'Subscription-Userinfo: %s\r\n' "\$(cat "$USERINFO")"
+fi
+printf 'Profile-Update-Interval: 24\r\n\r\n'
+exec cat "$out_dir/config.yaml"
+CGI
+chmod 755 "$WEBROOT/cgi-bin/$TOKEN"
+
 sub_port=$(tr -d '\r\n' < "$SUB_PORT_FILE" 2>/dev/null || echo "")
 sub_port=${sub_port:-2096}
 echo "订阅文件已生成：$out_dir/config.yaml"
-rules_count=$(grep -c '^- ' "$WEBROOT/$TOKEN/config.yaml" 2>/dev/null || echo 0)
+rules_count=$(grep -c '^- ' "$out_dir/config.yaml" 2>/dev/null || echo 0)
 echo "规则条数：${rules_count}"
 [[ -f $RULES_LOCAL ]] && echo "已合并私有规则：$RULES_LOCAL"
-echo "本地地址：http://127.0.0.1:${sub_port}/${TOKEN}/config.yaml"
+echo "本地地址：http://127.0.0.1:${sub_port}/cgi-bin/${TOKEN}"

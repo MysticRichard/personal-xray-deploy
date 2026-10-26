@@ -146,7 +146,7 @@ setup_subscription() {
     journalctl -u xray-sub -n 15 --no-pager >&2 || true
     fail 'xray-sub 未能启动'
   }
-  curl -fsS --max-time 5 "http://127.0.0.1:${sub_port}/${token}/config.yaml" -o /dev/null \
+  curl -fsS --max-time 5 "http://127.0.0.1:${sub_port}/cgi-bin/${token}" -o /dev/null \
     || fail '订阅本地自检失败'
 
   cat <<INFO
@@ -154,12 +154,15 @@ setup_subscription() {
 ============================================================
 订阅地址（复制到 FlClash 的"订阅"里）：
 
-  http://${SERVER_ADDRESS}:${SUB_PUBLIC_PORT:-$sub_port}/${token}/config.yaml
+  http://${SERVER_ADDRESS}:${SUB_PUBLIC_PORT:-$sub_port}/cgi-bin/${token}
 
 说明：
   - 公网 ${SUB_PUBLIC_PORT:-$sub_port} 需在平台映射到实例 ${sub_port}
-  - 规则文件在服务器 /etc/xray-sub/rules.yaml，可直接编辑
-  - 改完执行 xray-sub 重新生成，FlClash 里下拉刷新即可
+  - 通用规则：/etc/xray-sub/rules.yaml
+  - 私有规则：/etc/xray-sub/rules.local.yaml（不进仓库）
+  - 流量额度：/etc/xray-sub/userinfo
+  - 改完执行 xray-sub 重新生成
+  - 随时查看地址：xray-admin --sub
 ============================================================
 
 INFO

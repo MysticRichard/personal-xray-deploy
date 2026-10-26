@@ -205,7 +205,7 @@ setup_subscription() {
     journalctl -u xray-sub -n 15 --no-pager >&2 || true
     fail 'xray-sub 未能启动'
   }
-  curl -fsS --max-time 5 "http://127.0.0.1:${sub_port}/${token}/config.yaml" -o /dev/null \
+  curl -fsS --max-time 5 "http://127.0.0.1:${sub_port}/cgi-bin/${token}" -o /dev/null \
     || fail '订阅本地自检失败'
 
   cat <<INFO
@@ -213,12 +213,15 @@ setup_subscription() {
 ============================================================
 订阅地址（复制到 FlClash 的"订阅"里）：
 
-  http://${SERVER_ADDRESS}:${SUB_PUBLIC_PORT:-$sub_port}/${token}/config.yaml
+  http://${SERVER_ADDRESS}:${SUB_PUBLIC_PORT:-$sub_port}/cgi-bin/${token}
 
 说明：
   - 公网 ${SUB_PUBLIC_PORT:-$sub_port} 需在平台映射到实例 ${sub_port}
-  - 规则文件在服务器 /etc/xray-sub/rules.yaml，可直接编辑
-  - 改完执行 xray-sub 重新生成，FlClash 里下拉刷新即可
+  - 通用规则：/etc/xray-sub/rules.yaml
+  - 私有规则：/etc/xray-sub/rules.local.yaml（不进仓库）
+  - 流量额度：/etc/xray-sub/userinfo
+  - 改完执行 xray-sub 重新生成
+  - 随时查看地址：xray-admin --sub
 ============================================================
 
 INFO
@@ -375,18 +378,16 @@ state=/usr/local/etc/xray/client.json
 sub_token_file=/etc/xray-sub/token
 sub_port_file=/etc/xray-sub/port
 sub_rules=/etc/xray-sub/rules.yaml
+sub_local=/etc/xray-sub/rules.local.yaml
 
 sub_url() {
   [[ -f $state && -s $sub_token_file ]] || { echo '尚未配置订阅'; return 1; }
-  local server public port token
+  local server publicp token sport
   server=$(jq -er .server "$state")
-  port=$(jq -er .port "$state")
   token=$(tr -d '\r\n' < "$sub_token_file")
-  # Subscription port: prefer the stored value; it is published on localhost only.
-  local sport publicp
   sport=$(tr -d '\r\n' < "$sub_port_file" 2>/dev/null || echo 2096)
   publicp=$(tr -d '\r\n' < /etc/xray-sub/public_port 2>/dev/null || echo "$sport")
-  printf 'http://%s:%s/%s/config.yaml\n' "$server" "${SUB_PUBLIC_PORT:-$publicp}" "$token"
+  printf 'http://%s:%s/cgi-bin/%s\n' "$server" "${SUB_PUBLIC_PORT:-$publicp}" "$token"
 }
 
 show_sub() {
@@ -396,9 +397,45 @@ show_sub() {
   echo
   echo "规则文件：$sub_rules"
   if [[ -f $sub_rules ]]; then
-    printf '规则条数：%s\n' "$(grep -c '^- ' "$sub_rules" || true)"
+    printf '通用规则：%s 条\n' "$(grep -c '^- ' "$sub_rules" 2>/dev/null || echo 0)"
+  fi
+  if [[ -f $sub_local ]]; then
+    printf '私有规则：%s 条\n' "$(grep -c '^- ' "$sub_local" 2>/dev/null || echo 0)"
+  else
+    echo '私有规则：未创建'
   fi
   systemctl is-active --quiet xray-sub && echo '订阅服务：运行中' || echo '订阅服务：未运行'
+}
+
+# One self-contained file a user can keep and reuse on any new computer.
+export_sub_info() {
+  local out=/root/xray-subscription.txt
+  {
+    echo '# 个人 Xray 订阅信息'
+    echo "# 生成时间：$(date -u '+%Y-%m-%d %H:%M UTC')"
+    echo
+    echo '## 订阅地址（粘到 FlClash 的订阅栏）'
+    sub_url
+    echo
+    echo '## 端口'
+    echo "代理公网端口：$(jq -er .port "$state" 2>/dev/null || echo 未知)"
+    echo "订阅公网端口：$(tr -d '\r\n' </etc/xray-sub/public_port 2>/dev/null || echo 2096)"
+    echo
+    echo '## 私有规则（rules.local.yaml）'
+    if [[ -s $sub_local ]]; then
+      grep -v '^[[:space:]]*$' "$sub_local"
+    else
+      echo '（未创建）'
+    fi
+    echo
+    echo '## 说明'
+    echo '这个文件含订阅地址，等同凭据。只存在自己的电脑上，不要公开。'
+    echo '换电脑后：新电脑导入上面的订阅地址即可，规则会随订阅下发。'
+    echo '换服务器后：在新服务器上重建，规则可从本文件的私有规则段复制回去。'
+  } > "$out"
+  chmod 600 "$out"
+  echo "已生成：$out"
+  echo '请下载到自己电脑保存，重装系统会删除。'
 }
 
 export_node() {
@@ -459,6 +496,24 @@ backup_all() {
   echo '请下载到自己电脑，重装会删除服务器内备份'
 }
 
+set_quota() {
+  local f=/etc/xray-sub/userinfo
+  echo '设置订阅里显示的流量额度。Clash 会读取这些值显示用量。'
+  echo '留空表示不显示该项。total 为 0 表示不限制。'
+  local up down total expire
+  read -r -p '已上传字节数 [0]: ' up; up=${up:-0}
+  read -r -p '已下载字节数 [0]: ' down; down=${down:-0}
+  read -r -p '总流量字节数（0=不限，100GB=107374182400） [0]: ' total; total=${total:-0}
+  read -r -p '到期时间（Unix 时间戳，0=长期有效） [0]: ' expire; expire=${expire:-0}
+  for v in "$up" "$down" "$total" "$expire"; do
+    [[ $v =~ ^[0-9]+$ ]] || { echo '只接受非负整数'; return 1; }
+  done
+  printf 'upload=%s; download=%s; total=%s; expire=%s\n' "$up" "$down" "$total" "$expire" > "$f"
+  chmod 640 "$f"
+  /usr/local/sbin/xray-sub >/dev/null || { echo '重新生成失败'; return 1; }
+  echo '已保存。Clash 下拉刷新订阅即可看到额度。'
+}
+
 check_config() { XRAY_LOCATION_ASSET=/usr/local/share/xray /usr/local/bin/xray run -test -config /usr/local/etc/xray/config.json; }
 
 change_sub_port() {
@@ -493,8 +548,10 @@ while true; do
   6. 编辑私有规则（rules.local.yaml）
   7. 重新生成订阅
   8. 修改订阅公网端口
-  9. 备份
- 10. 导出客户端节点
+  9. 设置流量额度（客户端显示）
+ 10. 导出订阅信息到文件（换电脑用）
+ 11. 备份
+ 12. 导出客户端节点
   0. 退出
 MENU
   read -r -p '选择: ' option || exit 0
@@ -507,11 +564,13 @@ MENU
     3) if check_config; then systemctl restart xray; sleep 2; systemctl is-active xray; fi;;
     4) show_sub;;
     5) edit_rules "$sub_rules";;
-    6) init_local_rules; edit_rules /etc/xray-sub/rules.local.yaml;;
+    6) init_local_rules; edit_rules "$sub_local";;
     7) /usr/local/sbin/xray-sub && echo '已重新生成，FlClash 下拉刷新即可';;
     8) change_sub_port;;
-    9) backup_all;;
-    10) export_node;;
+    9) set_quota;;
+    10) export_sub_info;;
+    11) backup_all;;
+    12) export_node;;
     0) exit 0;;
     *) echo '无效选项';;
   esac
@@ -532,6 +591,7 @@ RULES=/etc/xray-sub/rules.yaml
 RULES_LOCAL=/etc/xray-sub/rules.local.yaml
 TOKEN_FILE=/etc/xray-sub/token
 SUB_PORT_FILE=/etc/xray-sub/port
+USERINFO=/etc/xray-sub/userinfo
 WEBROOT=/srv/sub
 
 die() { printf 'ERROR: %s\n' "$*" >&2; exit 1; }
@@ -639,13 +699,30 @@ chmod 644 "$tmp"
 mv -f "$tmp" "$out_dir/config.yaml"
 chmod 644 "$out_dir/config.yaml"
 
+# Clash-family clients read the traffic quota from a response header, and
+# busybox httpd only executes CGI under a "cgi-bin" directory. So the token
+# lives in the CGI filename, not in the directory name.
+install -d -m 755 "$WEBROOT/cgi-bin"
+cat > "$WEBROOT/cgi-bin/$TOKEN" <<CGI
+#!/bin/sh
+# Subscription for token $TOKEN: quota headers + config body.
+set -eu
+printf 'Content-Type: text/yaml; charset=utf-8\r\n'
+if [ -s "$USERINFO" ]; then
+  printf 'Subscription-Userinfo: %s\r\n' "\$(cat "$USERINFO")"
+fi
+printf 'Profile-Update-Interval: 24\r\n\r\n'
+exec cat "$out_dir/config.yaml"
+CGI
+chmod 755 "$WEBROOT/cgi-bin/$TOKEN"
+
 sub_port=$(tr -d '\r\n' < "$SUB_PORT_FILE" 2>/dev/null || echo "")
 sub_port=${sub_port:-2096}
 echo "订阅文件已生成：$out_dir/config.yaml"
-rules_count=$(grep -c '^- ' "$WEBROOT/$TOKEN/config.yaml" 2>/dev/null || echo 0)
+rules_count=$(grep -c '^- ' "$out_dir/config.yaml" 2>/dev/null || echo 0)
 echo "规则条数：${rules_count}"
 [[ -f $RULES_LOCAL ]] && echo "已合并私有规则：$RULES_LOCAL"
-echo "本地地址：http://127.0.0.1:${sub_port}/${TOKEN}/config.yaml"
+echo "本地地址：http://127.0.0.1:${sub_port}/cgi-bin/${TOKEN}"
 XRAY_SUB_PAYLOAD
 cat > "$work/xray-sub.service" <<'XRAY_SUB_UNIT_PAYLOAD'
 [Unit]
