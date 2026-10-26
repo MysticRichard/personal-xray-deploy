@@ -1,0 +1,6 @@
+# CLIENT ONLY. Keep your actual file in a private backup, outside this repository.
+# Configure FlClash to prepend these rules through its local override/script.
+# Do not replace the complete subscription rules list with only this example.
+rules:
+  - DOMAIN,my-device.example.invalid,DIRECT
+  - IP-CIDR,192.0.2.10/32,DIRECT,no-resolve

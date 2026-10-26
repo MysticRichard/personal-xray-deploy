@@ -14,10 +14,17 @@ SELF_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 fail() { printf 'ERROR: %s\n' "$*" >&2; exit 1; }
 valid_port() { [[ "$1" =~ ^[1-9][0-9]{0,4}$ ]] && ((10#$1 <= 65535)); }
 validate() {
-  [[ ${SERVER_ADDRESS:-} =~ ^[A-Za-z0-9][A-Za-z0-9.:-]*$ ]] || fail 'Set SERVER_ADDRESS (public host/IP).'
+  [[ -n ${SERVER_ADDRESS:-} && ${#SERVER_ADDRESS} -le 253 && ${SERVER_ADDRESS} =~ ^[A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?(\.[A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?)*$ ]] \
+    || fail 'Set SERVER_ADDRESS as an IPv4 address or hostname (IPv6 literals are unsupported).'
   LISTEN_PORT=${LISTEN_PORT:-443}
   PUBLIC_PORT=${PUBLIC_PORT:-$LISTEN_PORT}
+  SUB_LISTEN_PORT=${SUB_LISTEN_PORT:-2096}
+  SUB_PUBLIC_PORT=${SUB_PUBLIC_PORT:-$SUB_LISTEN_PORT}
   valid_port "$LISTEN_PORT" && valid_port "$PUBLIC_PORT" || fail 'Invalid public/listen port.'
+  valid_port "$SUB_LISTEN_PORT" || fail 'Invalid subscription listen port.'
+  valid_port "$SUB_PUBLIC_PORT" || fail 'Invalid subscription public port.'
+  [[ $SUB_LISTEN_PORT != "$LISTEN_PORT" ]] || fail 'Subscription port must differ from the proxy port.'
+  [[ $SUB_PUBLIC_PORT != "$PUBLIC_PORT" ]] || fail 'Subscription public port must differ from the proxy public port.'
   [[ ${REALITY_DEST:-} =~ ^([A-Za-z0-9][A-Za-z0-9.-]*):([1-9][0-9]{0,4})$ ]] || fail 'Set REALITY_DEST=host:port.'
   DEST_HOST=${BASH_REMATCH[1]}; DEST_PORT=${BASH_REMATCH[2]}
   valid_port "$DEST_PORT" || fail 'Invalid target port.'
@@ -28,10 +35,47 @@ validate() {
       fail 'Choose a different target; existing Xray logs warn about Apple targets.';;
   esac
 }
+service_owns_port() {
+  local port="$1" unit="$2" main_pid pid expected_exe
+  main_pid=$(systemctl show -p MainPID --value "$unit" 2>/dev/null || true)
+  if [[ $main_pid =~ ^[1-9][0-9]*$ ]]; then
+    ss -lntHp "sport = :$port" 2>/dev/null | grep -Eq "pid=${main_pid},|pid=${main_pid}\)" && return 0
+  fi
+  # Fallback for limited systemctl shims: still require the listening PID's
+  # executable to match the service, never merely an active unit name.
+  case "$unit" in
+    xray) expected_exe=/usr/local/bin/xray;;
+    xray-sub) expected_exe=$(command -v busybox 2>/dev/null || true);;
+    *) return 1;;
+  esac
+  while read -r pid; do
+    [[ -r /proc/$pid/exe ]] || continue
+    [[ $(readlink -f "/proc/$pid/exe") == "$expected_exe" ]] && return 0
+  done < <(ss -lntHp "sport = :$port" 2>/dev/null | grep -oE 'pid=[0-9]+' | cut -d= -f2 | sort -u)
+  return 1
+}
+port_is_free_or_owned() {
+  local port="$1" unit="$2"
+  if ss -lntHp "sport = :$port" 2>/dev/null | grep -q .; then
+    service_owns_port "$port" "$unit" || fail "TCP port $port is occupied by another process."
+  fi
+}
+
 validate_secrets() {
   [[ ${CLIENT_UUID:-} =~ ^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$ ]] || fail 'Invalid UUID.'
   [[ ${PRIVATE_KEY:-} =~ ^[A-Za-z0-9_-]{43}$ && ${PUBLIC_KEY:-} =~ ^[A-Za-z0-9_-]{43}$ ]] || fail 'Invalid X25519 key format.'
   [[ ${SHORT_ID:-} =~ ^[0-9a-fA-F]{16}$ ]] || fail 'Expected one random 16-hex short ID.'
+}
+verify_saved_key_pair() {
+  local xray_bin="$1" private_key="$2" saved_public_key="$3" output derived_public_key
+  if ! output=$("$xray_bin" x25519 -i "$private_key" 2>/dev/null); then
+    fail 'Saved X25519 private key could not be processed; refusing to reuse it.'
+  fi
+  derived_public_key=$(printf '%s\n' "$output" | awk -F': *' '/^Password \(PublicKey\):/ {print $2; exit}')
+  [[ $derived_public_key =~ ^[A-Za-z0-9_-]{43}$ ]] \
+    || fail 'Xray did not return a valid public key for the saved private key; refusing to reuse it.'
+  [[ $derived_public_key == "$saved_public_key" ]] \
+    || fail 'Saved X25519 private_key/public_key mismatch; refusing to reuse saved key material.'
 }
 render() {
   validate
@@ -76,13 +120,15 @@ preflight() {
   df -h /
   (( $(df -Pk / | awk 'NR==2 {print $4}') > 180000 )) || fail 'Need at least 180 MB free for staging and rollback.'
   systemctl is-active --quiet x-ui && fail 'x-ui is running; stop it only after backup.'
-  if ss -lntH "sport = :$LISTEN_PORT" | grep -q .; then
-    systemctl is-active --quiet xray || fail 'Listen port is occupied by another service.'
+  if ss -lntHp "sport = :$LISTEN_PORT" 2>/dev/null | grep -q .; then
     [[ -f $STATE ]] || fail 'Unknown existing Xray instance; migration required.'
+    service_owns_port "$LISTEN_PORT" xray || fail 'Listen port is occupied by another service.'
     local old_port
-    old_port=$(jq -er .listen_port "$STATE")
+    old_port=$(jq -er '.listen_port // .port' "$STATE" 2>/dev/null) \
+      || fail 'Existing state file has no usable port; reinstall with a clean state or fix client.json.'
     [[ $old_port == "$LISTEN_PORT" ]] || fail 'Requested port is occupied; use the existing instance port or an unused port.'
   fi
+  port_is_free_or_owned "$SUB_LISTEN_PORT" xray-sub
   local address
   while read -r address; do
     case "$address" in
@@ -108,8 +154,9 @@ preflight() {
 # The public port is separate from the guest listen port, so the caller may
 # expose it through its own port-forward table.
 setup_subscription() {
-  local sub_port token
+  local activate=${1:-1} sub_port token unit_tmp
   sub_port=${SUB_LISTEN_PORT:-2096}
+  port_is_free_or_owned "$sub_port" xray-sub
   install -d -m 750 /etc/xray-sub
   install -d -m 755 /srv/sub
   printf '%s\n' "${SUB_PUBLIC_PORT:-$sub_port}" > /etc/xray-sub/public_port
@@ -147,25 +194,31 @@ setup_subscription() {
     useradd --system --no-create-home --home-dir /nonexistent \
       --shell /usr/sbin/nologin xray-sub || fail '无法创建 xray-sub 用户'
   fi
+  [[ $(id -u xray-sub) -ne 0 && $(id -g xray-sub) -ne 0 ]] || fail 'xray-sub 用户或组不能是 root'
   chown root:xray-sub /etc/xray-sub/userinfo 2>/dev/null || true
   chmod 640 /etc/xray-sub/userinfo 2>/dev/null || true
 
-  install -m 755 "$SELF_DIR/xray-sub.service" /tmp/xray-sub.service.tpl
+  unit_tmp=$(mktemp /run/xray-sub.service.XXXXXX)
   sed -e "s#__SUB_PORT__#$sub_port#g" \
       -e "s#__BUSYBOX__#$busybox_bin#g" \
-      /tmp/xray-sub.service.tpl > /etc/systemd/system/xray-sub.service
-  rm -f /tmp/xray-sub.service.tpl
+      "$SELF_DIR/xray-sub.service" > "$unit_tmp"
+  install -m 644 "$unit_tmp" /etc/systemd/system/xray-sub.service
+  rm -f "$unit_tmp"
   chmod 644 /etc/systemd/system/xray-sub.service
 
   /usr/local/sbin/xray-sub || fail '订阅生成失败'
 
   systemctl daemon-reload
-  systemctl enable xray-sub >/dev/null 2>&1 || true
+  if ((activate)); then
+    systemctl enable xray-sub >/dev/null 2>&1 || fail '无法启用订阅服务'
+  else
+    return 0
+  fi
 
   # Some nested container hosts reject mount-namespace setup for any unit that
   # requests it. Try the hardened unit first, then fall back to a minimal one
   # instead of failing the whole installation.
-  systemctl restart xray-sub
+  systemctl restart xray-sub || true
   sleep 2
   if ! systemctl is-active --quiet xray-sub; then
     if journalctl -u xray-sub -n 20 --no-pager 2>/dev/null | grep -q 'NAMESPACE\|Operation not supported'; then
@@ -194,7 +247,7 @@ UNIT
       chmod 644 /etc/systemd/system/xray-sub.service
       systemctl daemon-reload
       systemctl reset-failed xray-sub 2>/dev/null || true
-      systemctl restart xray-sub
+      systemctl restart xray-sub || true
       sleep 2
     fi
   fi
@@ -216,7 +269,7 @@ UNIT
 说明：
   - 公网 ${SUB_PUBLIC_PORT:-$sub_port} 需在平台映射到实例 ${sub_port}
   - 通用规则：/etc/xray-sub/rules.yaml
-  - 私有规则：/etc/xray-sub/rules.local.yaml（不进仓库）
+  - 私有设备规则请保留在 FlClash 本地 override，不上传到 VPS
   - 流量额度：/etc/xray-sub/userinfo
   - 改完执行 xray-sub 重新生成
   - 随时查看地址：xray-admin --sub
@@ -227,34 +280,79 @@ INFO
 
 install_node() {  preflight
   [[ -f "$SELF_DIR/xray-admin" ]] || fail 'Copy the full deployment folder, including xray-admin.'
+  bash -n "$SELF_DIR/xray-sub"
+  bash -n "$SELF_DIR/xray-admin"
   if [[ -e $CONFIG && ! -f $STATE ]]; then fail 'Existing unmanaged config: refusing to replace it.'; fi
   # EXIT runs after this function returns: rollback state must stay in scope.
-  active=0; changed=0
+  active=0; sub_active=0; enabled=disabled; sub_enabled=disabled; changed=0
   stage=$(mktemp -d)
   backup="/root/xray-backups/$(date -u +%Y%m%dT%H%M%SZ)-$$"
   mkdir -p "$backup"
   chmod 700 /root/xray-backups "$backup"
-  systemctl is-active --quiet xray && active=1
+  systemctl is-active --quiet xray && active=1 || true
+  systemctl is-active --quiet xray-sub && sub_active=1 || true
+  enabled=$(systemctl is-enabled xray 2>/dev/null || true)
+  sub_enabled=$(systemctl is-enabled xray-sub 2>/dev/null || true)
+  [[ -n $enabled ]] || enabled=disabled
+  [[ -n $sub_enabled ]] || sub_enabled=disabled
+  snapshot() {
+    local key="$1" path="$2"
+    if [[ -e $path || -L $path ]]; then
+      cp -a "$path" "$backup/$key"
+    else
+      : > "$backup/$key.absent"
+    fi
+  }
+  restore() {
+    local key="$1" path="$2"
+    rm -rf "$path"
+    if [[ -e $backup/$key ]]; then
+      mkdir -p "$(dirname "$path")"
+      cp -a "$backup/$key" "$path"
+    fi
+  }
+  restore_enabled() {
+    local unit="$1" state="$2"
+    case "$state" in
+      enabled|enabled-runtime|linked|linked-runtime)
+        systemctl unmask "$unit" >/dev/null 2>&1 || true
+        systemctl enable "$unit" >/dev/null 2>&1 || true;;
+      masked)
+        systemctl mask "$unit" >/dev/null 2>&1 || true;;
+      *) systemctl disable "$unit" >/dev/null 2>&1 || true;;
+    esac
+  }
   cleanup() {
     local rc=$?
     if ((rc != 0 && changed == 1)); then
       echo "Install failed; restoring files from $backup" >&2
       systemctl stop xray 2>/dev/null || true
-      for pair in "config:$CONFIG" "state:$STATE" "binary:$BIN" "geoip:$ASSETS/geoip.dat" "unit:$UNIT" "admin:/usr/local/sbin/xray-admin"; do
-        local key=${pair%%:*} path=${pair#*:}
-        if [[ -f $backup/$key ]]; then cp -p "$backup/$key" "$path"; else rm -f "$path"; fi
+      systemctl stop xray-sub 2>/dev/null || true
+      for pair in \
+        "xrayetc:/usr/local/etc/xray" "binary:$BIN" "assets:$ASSETS" "unit:$UNIT" "admin:/usr/local/sbin/xray-admin" \
+        "subetc:/etc/xray-sub" "subweb:/srv/sub" "subunit:/etc/systemd/system/xray-sub.service" \
+        "subbin:/usr/local/sbin/xray-sub"; do
+        restore "${pair%%:*}" "${pair#*:}"
       done
       systemctl daemon-reload || true
-      if ((active)); then systemctl start xray || true; else systemctl disable xray 2>/dev/null || true; fi
+      restore_enabled xray "$enabled"
+      restore_enabled xray-sub "$sub_enabled"
+      if ((active)); then systemctl start xray || true; fi
+      if ((sub_active)); then systemctl start xray-sub || true; fi
     fi
     rm -rf "$stage"
     return "$rc"
   }
   trap cleanup EXIT
-  for pair in "config:$CONFIG" "state:$STATE" "binary:$BIN" "geoip:$ASSETS/geoip.dat" "unit:$UNIT" "admin:/usr/local/sbin/xray-admin"; do
-    local key=${pair%%:*} path=${pair#*:}
-    [[ ! -f $path ]] || cp -p "$path" "$backup/$key"
-  done
+  snapshot xrayetc /usr/local/etc/xray
+  snapshot binary "$BIN"
+  snapshot assets "$ASSETS"
+  snapshot unit "$UNIT"
+  snapshot admin /usr/local/sbin/xray-admin
+  snapshot subetc /etc/xray-sub
+  snapshot subweb /srv/sub
+  snapshot subunit /etc/systemd/system/xray-sub.service
+  snapshot subbin /usr/local/sbin/xray-sub
   curl --fail --location --retry 2 --max-time 180 "https://github.com/XTLS/Xray-core/releases/download/$VERSION/Xray-linux-64.zip" -o "$stage/core.zip"
   printf '%s  %s\n' "$ARCHIVE_SHA256" "$stage/core.zip" | sha256sum --check --status || fail 'Release checksum mismatch.'
   # Decompress only what is needed, and drop the archive immediately: on a
@@ -268,6 +366,8 @@ install_node() {  preflight
     PRIVATE_KEY=$(jq -er .private_key "$STATE")
     PUBLIC_KEY=$(jq -er .public_key "$STATE")
     SHORT_ID=$(jq -er .short_id "$STATE")
+    validate_secrets
+    verify_saved_key_pair "$stage/core/xray" "$PRIVATE_KEY" "$PUBLIC_KEY"
   else
     CLIENT_UUID=$(cat /proc/sys/kernel/random/uuid)
     SHORT_ID=$(openssl rand -hex 8)
@@ -281,6 +381,7 @@ install_node() {  preflight
   jq -n --arg uuid "$CLIENT_UUID" --arg private_key "$PRIVATE_KEY" --arg public_key "$PUBLIC_KEY" --arg short_id "$SHORT_ID" --arg server "$SERVER_ADDRESS" --argjson port "$PUBLIC_PORT" --argjson listen_port "$LISTEN_PORT" --arg server_name "$REALITY_SERVER_NAME" '{uuid:$uuid, private_key:$private_key, public_key:$public_key, short_id:$short_id, server:$server, port:$port, listen_port:$listen_port, server_name:$server_name}' > "$stage/client.json"
   getent group xray >/dev/null || groupadd --system xray
   id xray >/dev/null 2>&1 || useradd --system --gid xray --no-create-home --home-dir /nonexistent --shell /usr/sbin/nologin xray
+  [[ $(id -u xray) -ne 0 && $(id -g xray) -ne 0 ]] || fail 'xray 用户或组不能是 root'
   install -d -m 750 -o root -g xray /usr/local/etc/xray
   install -d -m 755 "$ASSETS"
   cat > "$stage/xray.service" <<'EOF'
@@ -294,9 +395,8 @@ StartLimitBurst=10
 User=xray
 Group=xray
 Environment=XRAY_LOCATION_ASSET=/usr/local/share/xray
-# Low-RAM hosts: constrain the Go heap explicitly. The runtime only picks up a
-# cgroup limit when the process can see one; nested containers often cannot,
-# so without this the heap grows past a 128 MB budget and gets OOM-killed.
+# Low-memory mitigation: set an explicit Go heap target for this small host.
+# This is a guardrail, not proof of the cause of any prior startup failure.
 Environment=GOMEMLIMIT=48MiB
 Environment=GOGC=30
 ExecStart=/usr/local/bin/xray run -config /usr/local/etc/xray/config.json
@@ -327,15 +427,17 @@ EOF
   install -m 600 "$stage/client.json" "$STATE"
   install -m 644 "$stage/xray.service" "$UNIT"
   install -m 700 "$SELF_DIR/xray-admin" /usr/local/sbin/xray-admin
-  # 128 MB hosts count page cache toward the cgroup limit: a freshly extracted
-  # 35 MB binary can push the first start over the edge and get OOM-killed.
+  # Drop the extracted staging directory before activation to reduce temporary
+  # disk/page-cache pressure on small hosts.
   rm -rf "$stage"
   sync
+  # Build and validate every subscription payload before touching either service.
+  setup_subscription 0
   systemctl daemon-reload
   systemctl enable xray
   local attempt
   for attempt in 1 2 3; do
-    systemctl restart xray
+    systemctl restart xray || true
     sleep 3
     systemctl is-active --quiet xray && break
     if [[ $attempt -lt 3 ]]; then
@@ -355,7 +457,7 @@ EOF
     fail 'Xray did not stay active.'
   fi
   ss -lntH "sport = :$LISTEN_PORT" | grep -q . || fail 'Xray is active but requested port is not listening.'
-  setup_subscription
+  setup_subscription 1
   echo "PASS: local service listening. Backup: $backup"
   echo 'Run xray-admin for status, logs and client export. Test the public endpoint before claiming connectivity.'
 }

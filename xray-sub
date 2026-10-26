@@ -2,14 +2,13 @@
 # Rebuild the Clash/FlClash subscription from the editable rules template.
 # Files:
 #   /etc/xray-sub/token       random URL path segment
-#   /etc/xray-sub/rules.yaml  rule entries, one per line, each starting with "- "
+#   /etc/xray-sub/rules.yaml  public rule entries, one per line
 #   /srv/sub/<token>/config.yaml  generated (served over HTTP)
 set -Eeuo pipefail
 umask 027
 
 STATE=/usr/local/etc/xray/client.json
 RULES=/etc/xray-sub/rules.yaml
-RULES_LOCAL=/etc/xray-sub/rules.local.yaml
 TOKEN_FILE=/etc/xray-sub/token
 SUB_PORT_FILE=/etc/xray-sub/port
 USERINFO=/etc/xray-sub/userinfo
@@ -24,25 +23,50 @@ die() { printf 'ERROR: %s\n' "$*" >&2; exit 1; }
 TOKEN=$(tr -d '\r\n' < "$TOKEN_FILE")
 [[ $TOKEN =~ ^[A-Za-z0-9_-]{16,64}$ ]] || die '订阅令牌格式不正确'
 
-# Validate every meaningful line is a rule entry. Fail closed: a malformed
-# template must not silently produce a config that routes everything direct.
+# Validate every meaningful line as a Clash rule, not merely as YAML list syntax.
+# A malformed template must not silently produce a config with a different route.
 validate_rules() {
-  local file="$1" label="$2" line_no=0 bad=0 line
-  [[ -f $file ]] || return 0
+  local file="$1" label="$2" line_no=0 bad=0 count=0 matches=0 line payload rule_type first
+  [[ -f $file ]] || die "$label 不存在"
   while IFS= read -r line || [[ -n $line ]]; do
     line_no=$((line_no + 1))
-    case $line in
-      ''|\#*) continue ;;
-      '- '*) ;;
-      *) printf '%s 第 %d 行不是规则条目（应以 "- " 开头）：%s\n' "$label" "$line_no" "$line" >&2; bad=1 ;;
+    if [[ $line =~ ^[[:space:]]*$ || $line =~ ^[[:space:]]*# ]]; then
+      continue
+    fi
+    if [[ $line != '- '* ]]; then
+      printf '%s 第 %d 行不是规则条目（应以 "- " 开头）：%s\n' "$label" "$line_no" "$line" >&2
+      bad=1
+      continue
+    fi
+    payload=${line#- }
+    first=${payload:0:1}
+    rule_type=${payload%%,*}
+    if [[ -z $payload || -z $rule_type || ! $rule_type =~ ^[A-Z0-9_-]+$ || $payload == *$'\r'* || $payload == *$'\t'* || $payload == *': '* || $payload == *' #' || $payload != *,* ]]; then
+      bad=1
+      continue
+    fi
+    case $first in '['|'{'|'&'|'*'|'!'|'|'|'>'|'@'|'`'|'?') bad=1; continue ;; esac
+    case $rule_type in
+      DOMAIN|DOMAIN-SUFFIX|DOMAIN-KEYWORD|DOMAIN-REGEX|DOMAIN-WILDCARD|GEOSITE|GEOIP|IP-CIDR|IP-CIDR6|SRC-IP-CIDR|SRC-IP-CIDR6|DST-IP-CIDR|DST-IP-CIDR6|RULE-SET|PROCESS-NAME|PROCESS-PATH|PROCESS-NAME-REGEX|PROCESS-PATH-REGEX|IN-TYPE|IN-USER|IN-NAME|SRC-PORT|DST-PORT|NETWORK|AND|OR|NOT) ;;
+      MATCH)
+        [[ $payload == 'MATCH,PROXY' ]] || bad=1
+        matches=$((matches + 1))
+        ;;
+      *) bad=1 ;;
     esac
+    count=$((count + 1))
+    if (( matches > 0 )) && [[ $payload != 'MATCH,PROXY' ]]; then
+      bad=1
+    fi
   done < "$file"
+  if ((count == 0)); then
+    die "$label 为空或无效"
+  fi
+  ((matches == 1)) || bad=1
+  [[ $payload == 'MATCH,PROXY' ]] || bad=1
   ((bad == 0)) || die '规则校验失败，未生成订阅'
-  return 0
 }
-validate_rules "$RULES" '通用规则'
-# Optional private rules; never shipped with the repo.
-[[ -f $RULES_LOCAL ]] && validate_rules "$RULES_LOCAL" '私有规则'
+validate_rules "$RULES" '通用规则' generic
 
 uuid=$(jq -er .uuid "$STATE")
 pub=$(jq -er .public_key "$STATE")
@@ -50,11 +74,25 @@ sid=$(jq -er .short_id "$STATE")
 server=$(jq -er .server "$STATE")
 port=$(jq -er .port "$STATE")
 sni=$(jq -er .server_name "$STATE")
+[[ $uuid =~ ^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$ ]] || die '状态中的 UUID 不正确'
+[[ $pub =~ ^[A-Za-z0-9_-]{43}$ && $sid =~ ^[0-9a-fA-F]{16}$ ]] || die '状态中的 Reality 公钥或 short-id 不正确'
+[[ $server =~ ^[A-Za-z0-9][A-Za-z0-9.:-]*$ ]] || die '状态中的服务器地址不正确'
+[[ $sni =~ ^[A-Za-z0-9][A-Za-z0-9.-]*$ ]] || die '状态中的 serverName 不正确'
+[[ $port =~ ^[1-9][0-9]{0,4}$ ]] && ((10#$port <= 65535)) || die '状态中的端口不正确'
+
+# The CGI service needs directory traversal but must not gain access to root-only files.
+state_dir=${USERINFO%/*}
+[[ $state_dir == "$USERINFO" ]] && state_dir=/etc/xray-sub
+if [[ -d $state_dir ]]; then
+  chown "root:xray-sub" "$state_dir" 2>/dev/null || true
+  chmod 750 "$state_dir" || die '无法设置订阅状态目录权限'
+fi
 
 out_dir="$WEBROOT/$TOKEN"
-install -d -m 755 "$WEBROOT" "$out_dir"
+install -d -m 755 "$WEBROOT" "$out_dir" "$WEBROOT/cgi-bin"
 tmp=$(mktemp "$out_dir/.config.XXXXXX")
-trap 'rm -f "$tmp"' EXIT
+cgi_tmp=$(mktemp "$WEBROOT/cgi-bin/.cgi.XXXXXX")
+trap 'rm -f "$tmp" "$cgi_tmp"' EXIT
 
 {
   cat <<EOF
@@ -65,19 +103,29 @@ log-level: warning
 ipv6: false
 unified-delay: true
 tcp-concurrent: true
-find-process-mode: "off"
-global-client-fingerprint: chrome
+find-process-mode: strict
 
 dns:
   enable: true
   ipv6: false
   enhanced-mode: fake-ip
   fake-ip-range: 198.18.0.1/16
+  fake-ip-filter:
+    - '*.lan'
+    - '*.local'
+    - '*.home.arpa'
+  default-nameserver:
+    - 223.5.5.5
+    - 1.1.1.1
+  proxy-server-nameserver:
+    - https://223.5.5.5/dns-query
   nameserver:
     - https://223.5.5.5/dns-query
-    - https://1.1.1.1/dns-query
+  # Foreign resolvers use an explicit proxy route; avoids direct DNS blocked by
+  # the access network after selecting this profile.
   fallback:
-    - https://8.8.8.8/dns-query
+    - 'https://1.1.1.1/dns-query#PROXY'
+    - 'https://8.8.8.8/dns-query#PROXY'
 
 proxies:
   - name: "Personal-VPS"
@@ -104,21 +152,25 @@ proxy-groups:
 
 rules:
 EOF
-  # Private rules first: they must win over the generic template and MATCH.
-  if [[ -f $RULES_LOCAL ]]; then
-    grep -v '^[[:space:]]*#' "$RULES_LOCAL" | grep -v '^[[:space:]]*$' || true
-  fi
-  cat "$RULES"
+  append_rules() {
+    local file="$1" line
+    while IFS= read -r line || [[ -n $line ]]; do
+      [[ $line =~ ^[[:space:]]*$ || $line =~ ^[[:space:]]*# ]] && continue
+      printf '%s\n' "$line"
+    done < "$file"
+  }
+  # Personal device exceptions belong in a local FlClash override and are
+  # intentionally never published by this server subscription.
+  append_rules "$RULES"
 } > "$tmp"
 
 # Sanity: generated file must contain the node and at least one rule.
 grep -q 'Personal-VPS' "$tmp" || die '生成的订阅缺少节点'
-grep -q '^  - \|^- ' "$tmp" || die '生成的订阅缺少规则'
+grep -q '^- ' "$tmp" || die '生成的订阅缺少规则'
 [[ $(wc -c < "$tmp") -gt 200 ]] || die '生成的订阅过小'
 
 chmod 644 "$tmp"
 mv -f "$tmp" "$out_dir/config.yaml"
-chmod 644 "$out_dir/config.yaml"
 
 # The service user must read the quota file; token stays root-only.
 if [[ -f $USERINFO ]]; then
@@ -129,24 +181,41 @@ fi
 # Clash-family clients read the traffic quota from a response header, and
 # busybox httpd only executes CGI under a "cgi-bin" directory. So the token
 # lives in the CGI filename, not in the directory name.
-install -d -m 755 "$WEBROOT/cgi-bin"
-cat > "$WEBROOT/cgi-bin/$TOKEN" <<CGI
+cat > "$cgi_tmp" <<CGI
 #!/bin/sh
 # Subscription for token $TOKEN: quota headers + config body.
 set -eu
 printf 'Content-Type: text/yaml; charset=utf-8\r\n'
 if [ -s "$USERINFO" ]; then
-  printf 'Subscription-Userinfo: %s\r\n' "\$(cat "$USERINFO")"
+  quota=\$(cat "$USERINFO")
+  if printf '%s\n' "\$quota" | awk 'NR == 1 && \$0 ~ /^upload=[0-9]+; download=[0-9]+; total=[0-9]+; expire=[0-9]+$/ {ok=1} NR > 1 {ok=0} END {exit ok ? 0 : 1}'; then
+    printf 'Subscription-Userinfo: %s\r\n' "\$quota"
+  fi
 fi
 printf 'Profile-Update-Interval: 24\r\n\r\n'
 exec cat "$out_dir/config.yaml"
 CGI
-chmod 755 "$WEBROOT/cgi-bin/$TOKEN"
+chmod 755 "$cgi_tmp"
+mv -f "$cgi_tmp" "$WEBROOT/cgi-bin/$TOKEN"
+
+# Remove only generated artifacts for rotated tokens, after the new pair is live.
+for old_dir in "$WEBROOT"/*; do
+  [[ -d $old_dir && $old_dir != "$out_dir" ]] || continue
+  old_name=${old_dir##*/}
+  [[ $old_name =~ ^[A-Za-z0-9_-]{16,64}$ ]] || continue
+  rm -f -- "$old_dir/config.yaml"
+  rmdir -- "$old_dir" 2>/dev/null || true
+done
+for old_cgi in "$WEBROOT/cgi-bin"/*; do
+  [[ -f $old_cgi ]] || continue
+  old_name=${old_cgi##*/}
+  [[ $old_name =~ ^[A-Za-z0-9_-]{16,64}$ && $old_name != "$TOKEN" ]] || continue
+  rm -f -- "$old_cgi"
+done
 
 sub_port=$(tr -d '\r\n' < "$SUB_PORT_FILE" 2>/dev/null || echo "")
 sub_port=${sub_port:-2096}
 echo "订阅文件已生成：$out_dir/config.yaml"
 rules_count=$(grep -c '^- ' "$out_dir/config.yaml" 2>/dev/null || echo 0)
 echo "规则条数：${rules_count}"
-[[ -f $RULES_LOCAL ]] && echo "已合并私有规则：$RULES_LOCAL"
 echo "本地地址：http://127.0.0.1:${sub_port}/cgi-bin/${TOKEN}"

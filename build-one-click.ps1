@@ -7,78 +7,79 @@ $subUnit = [IO.File]::ReadAllText((Join-Path $root 'xray-sub.service')).Replace(
 $rules = [IO.File]::ReadAllText((Join-Path $root 'rules.template.yaml')).Replace("`r`n", "`n").TrimEnd()
 $header = @'
 #!/usr/bin/env bash
-# Generated from reviewed installer and menu. Debian amd64, single personal node.
+# Generated installer + maintenance menu + subscription renderer.
 set -Eeuo pipefail
-umask 077
-[[ $EUID -eq 0 ]] || { echo '请使用 root 运行'; exit 1; }
-# Prevent credentials leaking when the caller invokes bash -x.
 set +x
+umask 077
+SCRIPT_VERSION=2026.10.26-review1
+printf '个人 Xray 安装脚本 %s\n' "$SCRIPT_VERSION"
+[[ $EUID -eq 0 ]] || { echo '请使用 root 运行'; exit 1; }
 [[ -f /etc/debian_version && -d /run/systemd/system ]] || { echo '需要 Debian + systemd'; exit 1; }
 [[ $(uname -m) == x86_64 ]] || { echo '当前脚本仅支持 amd64'; exit 1; }
-export REALITY_DEST=${REALITY_DEST:-}
-export REALITY_SERVER_NAME=${REALITY_SERVER_NAME:-}
-# Reuse saved endpoint on repeat installs; never guess the public IP through NAT.
-if [[ -f /usr/local/etc/xray/client.json ]] && command -v jq >/dev/null; then
-  SERVER_ADDRESS=${SERVER_ADDRESS:-$(jq -er .server /usr/local/etc/xray/client.json)}
-  PUBLIC_PORT=${PUBLIC_PORT:-$(jq -er .port /usr/local/etc/xray/client.json)}
-  LISTEN_PORT=${LISTEN_PORT:-$(jq -er .listen_port /usr/local/etc/xray/client.json)}
-fi
-# Subscription endpoint saved by a previous run, if any.
-if [[ -f /etc/xray-sub/public_port ]]; then
-  SUB_PUBLIC_PORT=${SUB_PUBLIC_PORT:-$(tr -d '\r\n' </etc/xray-sub/public_port)}
-fi
-if [[ -f /etc/xray-sub/port ]]; then
-  SUB_LISTEN_PORT=${SUB_LISTEN_PORT:-$(tr -d '\r\n' </etc/xray-sub/port)}
-fi
-if [[ -z ${SERVER_ADDRESS:-} || $SERVER_ADDRESS == REPLACE_* ]]; then
-  read -r -p '输入平台显示的 VPS 公网 IP 或域名: ' SERVER_ADDRESS
-fi
-if [[ -z ${PUBLIC_PORT:-} ]]; then
-  read -r -p '公网节点 TCP 端口（在平台端口转发里查看）: ' PUBLIC_PORT
-fi
-if [[ -z ${LISTEN_PORT:-} ]]; then
-  read -r -p '对应内部 TCP 端口（无 NAT 时与公网端口相同）: ' LISTEN_PORT
-fi
-if [[ -z ${REALITY_DEST:-} ]]; then
-  read -r -p 'REALITY 伪装目标 host:port [www.microsoft.com:443]: ' REALITY_DEST
-  REALITY_DEST=${REALITY_DEST:-www.microsoft.com:443}
-fi
-if [[ -z ${REALITY_SERVER_NAME:-} ]]; then
-  read -r -p 'REALITY serverName [www.microsoft.com]: ' REALITY_SERVER_NAME
-  REALITY_SERVER_NAME=${REALITY_SERVER_NAME:-www.microsoft.com}
-fi
-# Subscription needs its own port: it cannot share the REALITY listener without
-# breaking the camouflage fallback.
-if [[ -z ${SUB_PUBLIC_PORT:-} ]]; then
-  read -r -p '订阅公网端口（平台转发规则的外部端口）: ' SUB_PUBLIC_PORT
-fi
-if [[ -z ${SUB_LISTEN_PORT:-} ]]; then
-  read -r -p '订阅内部端口（对应转发规则的内部端口，无 NAT 时与公网端口相同）: ' SUB_LISTEN_PORT
-fi
-export SERVER_ADDRESS PUBLIC_PORT LISTEN_PORT REALITY_DEST REALITY_SERVER_NAME SUB_PUBLIC_PORT SUB_LISTEN_PORT
-printf '\n个人 Xray 一键安装\n代理  公网 %s:%s -> 内部 TCP %s\n订阅  公网 %s:%s -> 内部 TCP %s\n目标  %s\n' \
-  "$SERVER_ADDRESS" "$PUBLIC_PORT" "$LISTEN_PORT" \
-  "$SERVER_ADDRESS" "$SUB_PUBLIC_PORT" "$SUB_LISTEN_PORT" "$REALITY_DEST"
-echo '依次执行：依赖检查、目标检测、下载校验、配置检查、服务启动、订阅生成。'
-echo '不修改端口映射、系统源、宿主内核或防火墙。'
+trap 'echo "安装未完成，请保留最后的错误输出；不要重置服务器。" >&2' ERR
 missing=0
-for tool in curl openssl unzip jq ss free sha256sum timeout busybox; do
+for tool in curl openssl unzip jq ss free sha256sum timeout busybox nano; do
   command -v "$tool" >/dev/null || missing=1
 done
-if ((missing)); then
+if ((missing)) || [[ ! -s /etc/ssl/certs/ca-certificates.crt ]]; then
   export DEBIAN_FRONTEND=noninteractive
-  apt-get update
-  apt-get install -y --no-install-recommends \
-    ca-certificates curl openssl unzip jq iproute2 procps busybox
+  apt-get update -o Acquire::Retries=2 -o Acquire::http::Timeout=20 -o Acquire::https::Timeout=20
+  apt-get install -y --no-install-recommends ca-certificates curl openssl unzip jq iproute2 procps busybox nano
 fi
-# Re-check: an apt failure above must stop here with a clear reason.
-for tool in curl openssl unzip jq ss free sha256sum timeout busybox; do
-  command -v "$tool" >/dev/null || { echo "缺少依赖：$tool，请先手动安装后重试" >&2; exit 1; }
+for tool in curl openssl unzip jq ss free sha256sum timeout busybox nano; do
+  command -v "$tool" >/dev/null || { echo "缺少依赖：$tool" >&2; exit 1; }
 done
+saved=/usr/local/etc/xray/client.json
+# Existing values are shown as defaults, but interactive runs always ask again.
+# Only NONINTERACTIVE=1 may consume state without prompting.
+if [[ -f $saved ]] && [[ ${NONINTERACTIVE:-0} == 1 ]]; then
+  SERVER_ADDRESS=${SERVER_ADDRESS:-$(jq -er .server "$saved")}
+  PUBLIC_PORT=${PUBLIC_PORT:-$(jq -er .port "$saved")}
+  LISTEN_PORT=${LISTEN_PORT:-$(jq -er '.listen_port // .port' "$saved")}
+  REALITY_SERVER_NAME=${REALITY_SERVER_NAME:-$(jq -er .server_name "$saved")}
+fi
+if [[ -f /usr/local/etc/xray/config.json && ${NONINTERACTIVE:-0} == 1 ]]; then
+  REALITY_DEST=${REALITY_DEST:-$(jq -er '.inbounds[] | select(.tag == "personal") | .streamSettings.realitySettings | .target // .dest' /usr/local/etc/xray/config.json)}
+fi
+if [[ -s /etc/xray-sub/public_port && ${NONINTERACTIVE:-0} == 1 ]]; then
+  SUB_PUBLIC_PORT=${SUB_PUBLIC_PORT:-$(tr -d '\r\n' </etc/xray-sub/public_port)}
+fi
+if [[ -s /etc/xray-sub/port && ${NONINTERACTIVE:-0} == 1 ]]; then
+  SUB_LISTEN_PORT=${SUB_LISTEN_PORT:-$(tr -d '\r\n' </etc/xray-sub/port)}
+fi
+# Every interactive run shows all seven settings. Existing values are defaults,
+# never silently skipped. NONINTERACTIVE=1 is for explicit unattended deployment.
+ask() {
+  local name=$1 label=$2 default=${3:-} answer
+  if [[ ${NONINTERACTIVE:-0} == 1 ]]; then
+    [[ -n ${!name:-} ]] || { echo "缺少非交互参数：$name" >&2; exit 1; }
+    return
+  fi
+  if ! read -r -p "$label${default:+ [$default]}: " answer; then
+    echo '未读取到输入，请在终端运行安装命令。' >&2; exit 1
+  fi
+  answer=${answer:-$default}
+  [[ -n $answer ]] || { echo "$label 不能为空" >&2; exit 1; }
+  printf -v "$name" '%s' "$answer"
+}
+ask SERVER_ADDRESS 'VPS 公网 IP 或域名' "${SERVER_ADDRESS:-}"
+ask PUBLIC_PORT '代理公网 TCP 端口' "${PUBLIC_PORT:-}"
+ask LISTEN_PORT '代理内部 TCP 端口（无 NAT 时与公网相同）' "${LISTEN_PORT:-}"
+ask REALITY_DEST 'REALITY 目标 host:port（默认值并不保证防封，安装时会校验）' "${REALITY_DEST:-www.microsoft.com:443}"
+# A custom target should not silently retain the Microsoft SNI.
+default_sni=${REALITY_DEST%:*}
+ask REALITY_SERVER_NAME 'REALITY serverName' "$default_sni"
+ask SUB_PUBLIC_PORT '订阅公网 TCP 端口' "${SUB_PUBLIC_PORT:-}"
+ask SUB_LISTEN_PORT '订阅内部 TCP 端口（无 NAT 时与公网相同）' "${SUB_LISTEN_PORT:-}"
+export SERVER_ADDRESS PUBLIC_PORT LISTEN_PORT REALITY_DEST REALITY_SERVER_NAME SUB_PUBLIC_PORT SUB_LISTEN_PORT
+printf '\n代理 公网 %s:%s -> 内部 TCP %s\n订阅 公网 %s:%s -> 内部 TCP %s\n目标 %s\n' \
+  "$SERVER_ADDRESS" "$PUBLIC_PORT" "$LISTEN_PORT" "$SERVER_ADDRESS" "$SUB_PUBLIC_PORT" "$SUB_LISTEN_PORT" "$REALITY_DEST"
+echo '私有设备规则请留在 FlClash 本地覆写，不会上传到仓库。'
+echo '订阅目前使用 HTTP：随机路径只控制访问，不加密传输。'
+echo '套餐流量/重置日不会自动从供应商同步；未统计时不显示虚构已用量。'
 work=$(mktemp -d /tmp/xray-one-click.XXXXXXXX)
 cleanup() { rm -rf "$work"; }
 trap cleanup EXIT
-trap 'echo "安装未完成，请保留最后的错误输出；不要重置服务器。" >&2' ERR
 '@
 $footer = @'
 cat > "$work/xray-sub" <<'XRAY_SUB_PAYLOAD'

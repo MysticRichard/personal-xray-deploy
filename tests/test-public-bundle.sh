@@ -5,7 +5,7 @@ files=$(git -C "$root" ls-files | grep -v '^tests/' || true)
 fail=0
 
 # No instance-specific IPs, ports or provider details.
-for pattern in '34439' '2082' '42309' '103\.188\.82\.89' '23\.80\.90\.11'; do
+for pattern in '34439' '2082' '42309' '198\.51\.100\.89' '203\.0\.113\.11'; do
   if grep -rnE "$pattern" $files 2>/dev/null; then
     printf 'FAIL: instance-specific value %s found\n' "$pattern"
     fail=1

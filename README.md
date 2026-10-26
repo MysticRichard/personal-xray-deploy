@@ -53,7 +53,7 @@ xray-admin
 | 文件 | 用途 |
 |---|---|
 | `/etc/xray-sub/rules.yaml` | 通用规则，随仓库公开 |
-| `/etc/xray-sub/rules.local.yaml` | 你的私有规则，不进仓库 |
+| FlClash 本地覆写文件 | 你的私有设备规则，只保存在客户端 |
 
 私有规则排在通用规则之前，优先匹配。
 

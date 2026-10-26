@@ -6,7 +6,6 @@ state=/usr/local/etc/xray/client.json
 sub_token_file=/etc/xray-sub/token
 sub_port_file=/etc/xray-sub/port
 sub_rules=/etc/xray-sub/rules.yaml
-sub_local=/etc/xray-sub/rules.local.yaml
 
 sub_url() {
   [[ -f $state && -s $sub_token_file ]] || { echo '尚未配置订阅'; return 1; }
@@ -27,11 +26,8 @@ show_sub() {
   if [[ -f $sub_rules ]]; then
     printf '通用规则：%s 条\n' "$(grep -c '^- ' "$sub_rules" 2>/dev/null || echo 0)"
   fi
-  if [[ -f $sub_local ]]; then
-    printf '私有规则：%s 条\n' "$(grep -c '^- ' "$sub_local" 2>/dev/null || echo 0)"
-  else
-    echo '私有规则：未创建'
-  fi
+  echo '私有规则：请保存在 FlClash 本地覆写（不由 VPS 下发）'
+  echo '注意：HTTP 订阅链接中的令牌控制访问，但不加密传输。'
   systemctl is-active --quiet xray-sub && echo '订阅服务：运行中' || echo '订阅服务：未运行'
 }
 
@@ -49,17 +45,13 @@ export_sub_info() {
     echo "代理公网端口：$(jq -er .port "$state" 2>/dev/null || echo 未知)"
     echo "订阅公网端口：$(tr -d '\r\n' </etc/xray-sub/public_port 2>/dev/null || echo 2096)"
     echo
-    echo '## 私有规则（rules.local.yaml）'
-    if [[ -s $sub_local ]]; then
-      grep -v '^[[:space:]]*$' "$sub_local"
-    else
-      echo '（未创建）'
-    fi
+    echo '## 私有规则'
+    echo '请从 FlClash 本地备份恢复，不由 VPS 保存或发布。'
     echo
     echo '## 说明'
     echo '这个文件含订阅地址，等同凭据。只存在自己的电脑上，不要公开。'
-    echo '换电脑后：新电脑导入上面的订阅地址即可，规则会随订阅下发。'
-    echo '换服务器后：在新服务器上重建，规则可从本文件的私有规则段复制回去。'
+    echo '换电脑：导入订阅，再从自己的私有备份恢复 FlClash 本地覆写。'
+    echo '换 VPS：部署后更新订阅地址，本地覆写继续使用，不应上传到公开仓库。'
   } > "$out"
   chmod 600 "$out"
   echo "已生成：$out"
@@ -76,7 +68,8 @@ export_node() {
 
 edit_rules() {
   local target="${1:-$sub_rules}"
-  local backup="/root/xray-sub-rules-$(date -u +%Y%m%dT%H%M%SZ)-$(basename "$target")"
+  local backup
+  backup="/root/xray-sub-rules-$(date -u +%Y%m%dT%H%M%SZ)-$(basename "$target")"
   [[ -f $target ]] || {
     echo "文件不存在：$target"
     return 1
@@ -94,27 +87,9 @@ edit_rules() {
   fi
 }
 
-init_local_rules() {
-  [[ -f $sub_rules ]] || { echo '通用规则文件不存在，请先安装'; return 1; }
-  local target=/etc/xray-sub/rules.local.yaml
-  if [[ -f $target ]]; then
-    echo "私有规则文件已存在：$target"
-  else
-    cat > "$target" <<'EOF'
-# 私有分流规则（不会进入公开仓库）
-# 每行一条，"- " 开头；这些规则会排在通用规则之前，优先生效。
-# 示例：
-# - DOMAIN,your-device.example.net,DIRECT
-# - IP-CIDR,203.0.113.10/32,DIRECT,no-resolve
-EOF
-    chmod 640 "$target"
-    echo "已创建：$target"
-  fi
-  echo '编辑后执行 xray-sub 重新生成订阅'
-}
-
 backup_all() {
-  local file=/root/xray-backup-$(date -u +%Y%m%dT%H%M%SZ).tar.gz
+  local file
+  file=/root/xray-backup-$(date -u +%Y%m%dT%H%M%SZ).tar.gz
   local paths=(usr/local/etc/xray usr/local/sbin/xray-admin usr/local/sbin/xray-sub etc/xray-sub etc/systemd/system/xray.service etc/systemd/system/xray-sub.service usr/local/bin/xray usr/local/share/xray/geoip.dat srv/sub)
   local existing=()
   for p in "${paths[@]}"; do [[ -e /$p ]] && existing+=("$p"); done
@@ -127,7 +102,8 @@ backup_all() {
 set_quota() {
   local f=/etc/xray-sub/userinfo
   echo '设置订阅里显示的流量额度。Clash 会读取这些值显示用量。'
-  echo '留空表示不显示该项。total 为 0 表示不限制。'
+  echo '这是手动快照，不自动统计、限流或按月重置；expire 是套餐到期，不是重置日。'
+  echo '留空使用 0；total=0 是否显示无限取决于客户端。真实余额请核对供应商后台。'
   local up down total expire
   read -r -p '已上传字节数 [0]: ' up; up=${up:-0}
   read -r -p '已下载字节数 [0]: ' down; down=${down:-0}
@@ -148,7 +124,9 @@ change_sub_port() {
   local current
   current=$(tr -d '\r\n' </etc/xray-sub/public_port 2>/dev/null || echo 2096)
   echo "当前订阅公网端口：$current"
-  echo '只改对外显示的端口，实例内部仍监听 2096，不会动平台映射。'
+  local internal
+  internal=$(cat "$sub_port_file") || return 1
+  echo "只改对外地址，内部仍监听 $internal；平台映射由你自行配置。"
   local new
   read -r -p '新的订阅公网端口（回车保持不变）: ' new
   if [[ -z $new ]]; then echo '未修改'; return 0; fi
@@ -173,7 +151,7 @@ while true; do
   3. 检查配置并重启
   4. 查看订阅地址
   5. 编辑通用规则（rules.yaml）
-  6. 编辑私有规则（rules.local.yaml）
+  6. 私有规则迁移说明（FlClash 本地覆写）
   7. 重新生成订阅
   8. 修改订阅公网端口
   9. 设置流量额度（客户端显示）
@@ -185,20 +163,20 @@ MENU
   read -r -p '选择: ' option || exit 0
   case $option in
     1) systemctl --no-pager --full status xray || true
-       ss -lntp | grep -E ':2082|:2096' || ss -lntp
+       ss -lntp
        systemctl show xray -p MemoryCurrent -p MemoryMax 2>/dev/null || true
        free -m;;
     2) journalctl -u xray -n 40 --no-pager;;
     3) if check_config; then systemctl restart xray; sleep 2; systemctl is-active xray; fi;;
-    4) show_sub;;
-    5) edit_rules "$sub_rules";;
-    6) init_local_rules; edit_rules "$sub_local";;
+    4) show_sub || echo '订阅状态读取失败';;
+    5) edit_rules "$sub_rules" || echo '规则未更新，原文件已保留或恢复';;
+    6) echo '私有设备规则应在 FlClash 本地覆写中添加并备份；不在 VPS 创建或发布。';;
     7) /usr/local/sbin/xray-sub && echo '已重新生成，FlClash 下拉刷新即可';;
-    8) change_sub_port;;
-    9) set_quota;;
-    10) export_sub_info;;
-    11) backup_all;;
-    12) export_node;;
+    8) change_sub_port || echo '端口未修改';;
+    9) set_quota || echo '额度未成功更新';;
+    10) export_sub_info || echo '导出失败';;
+    11) backup_all || echo '备份失败，请检查磁盘';;
+    12) export_node || echo '导出失败';;
     0) exit 0;;
     *) echo '无效选项';;
   esac

@@ -7,7 +7,6 @@ port=18095
 
 sed -e "s#^STATE=.*#STATE=$work/client.json#" \
     -e "s#^RULES=.*#RULES=$work/rules.yaml#" \
-    -e "s#^RULES_LOCAL=.*#RULES_LOCAL=$work/rules.local.yaml#" \
     -e "s#^TOKEN_FILE=.*#TOKEN_FILE=$work/token#" \
     -e "s#^SUB_PORT_FILE=.*#SUB_PORT_FILE=$work/port#" \
     -e "s#^USERINFO=.*#USERINFO=$work/userinfo#" \
