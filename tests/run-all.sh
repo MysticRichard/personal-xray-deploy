@@ -37,7 +37,11 @@ else
       echo "FAIL: private value in shipped file: $needle"; bad=1
     fi
   done
-  ((bad == 0)) && echo 'PASS: no private values in shipped files' || exit 1
+  if [ "$bad" -eq 0 ]; then
+    echo 'PASS: no private values in shipped files'
+  else
+    exit 1
+  fi
 fi
 
 echo 'ALL REGRESSION CHECKS DONE'
