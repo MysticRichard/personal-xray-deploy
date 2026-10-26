@@ -212,6 +212,10 @@ token_before=$(tr -d '\r\n' <"$sub_dir/token") || fail 'installed token is missi
 [[ $token_before =~ ^[A-Za-z0-9_-]{16,64}$ ]] || fail 'installed token has an invalid shape'
 private_key=$(jq -er .private_key "$state") || fail 'installed private key is missing'
 
+# The installer seeds total/expire from the plan before any manual usage update.
+grep -Eq '^upload=0; download=0; total=107374182400; expire=[0-9]+$' "$sub_dir/userinfo" \
+  || fail 'initial plan quota was not seeded into userinfo'
+
 # Create quota data with the exact parent/file permissions used by the CGI service.
 printf '%s\n' 'upload=0; download=53687091200; total=107374182400; expire=1800000000' >"$sub_dir/userinfo"
 chown root:"$sub_user" "$sub_dir/userinfo"
