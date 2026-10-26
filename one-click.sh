@@ -200,8 +200,27 @@ setup_subscription() {
 
   printf '%s\n' "$sub_port" > /etc/xray-sub/port
   install -m 755 "$SELF_DIR/xray-sub" /usr/local/sbin/xray-sub
+
+  # busybox may not be installed (minimal images), and the service user must be
+  # able to read the quota file that the CGI prints as a header.
+  if ! command -v busybox >/dev/null 2>&1; then
+    echo '安装 busybox（订阅服务需要它提供静态 HTTP）'
+    DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends busybox >/dev/null 2>&1 \
+      || fail 'busybox 安装失败'
+  fi
+  local busybox_bin
+  busybox_bin=$(command -v busybox) || fail '找不到 busybox'
+  if ! id -u xray-sub >/dev/null 2>&1; then
+    useradd --system --no-create-home --home-dir /nonexistent \
+      --shell /usr/sbin/nologin xray-sub || fail '无法创建 xray-sub 用户'
+  fi
+  chown root:xray-sub /etc/xray-sub/userinfo 2>/dev/null || true
+  chmod 640 /etc/xray-sub/userinfo 2>/dev/null || true
+
   install -m 755 "$SELF_DIR/xray-sub.service" /tmp/xray-sub.service.tpl
-  sed "s/__SUB_PORT__/$sub_port/g" /tmp/xray-sub.service.tpl > /etc/systemd/system/xray-sub.service
+  sed -e "s#__SUB_PORT__#$sub_port#g" \
+      -e "s#__BUSYBOX__#$busybox_bin#g" \
+      /tmp/xray-sub.service.tpl > /etc/systemd/system/xray-sub.service
   rm -f /tmp/xray-sub.service.tpl
   chmod 644 /etc/systemd/system/xray-sub.service
 
@@ -218,7 +237,6 @@ setup_subscription() {
   if ! systemctl is-active --quiet xray-sub; then
     if journalctl -u xray-sub -n 20 --no-pager 2>/dev/null | grep -q 'NAMESPACE\|Operation not supported'; then
       echo '检测到嵌套容器不支持 mount namespace，改用精简服务配置' >&2
-      # busybox httpd reads its document root from -h; no namespacing needed.
       cat > /etc/systemd/system/xray-sub.service <<UNIT
 [Unit]
 Description=Personal Clash subscription (minimal)
@@ -226,9 +244,11 @@ After=network.target
 
 [Service]
 Type=simple
-ExecStart=/usr/bin/busybox httpd -f -p 127.0.0.1:${sub_port} -h /srv/sub
+ExecStart=${busybox_bin} httpd -f -p 127.0.0.1:${sub_port} -h /srv/sub
 Restart=always
 RestartSec=5
+User=xray-sub
+Group=xray-sub
 NoNewPrivileges=true
 CapabilityBoundingSet=
 UMask=0027
@@ -744,6 +764,12 @@ chmod 644 "$tmp"
 mv -f "$tmp" "$out_dir/config.yaml"
 chmod 644 "$out_dir/config.yaml"
 
+# The service user must read the quota file; token stays root-only.
+if [[ -f $USERINFO ]]; then
+  chown "root:xray-sub" "$USERINFO" 2>/dev/null || true
+  chmod 640 "$USERINFO"
+fi
+
 # Clash-family clients read the traffic quota from a response header, and
 # busybox httpd only executes CGI under a "cgi-bin" directory. So the token
 # lives in the CGI filename, not in the directory name.
@@ -778,14 +804,13 @@ StartLimitBurst=10
 
 [Service]
 Type=simple
-ExecStart=/usr/bin/busybox httpd -f -p 127.0.0.1:__SUB_PORT__ -h /srv/sub
+ExecStart=__BUSYBOX__ httpd -f -p 127.0.0.1:__SUB_PORT__ -h /srv/sub
 Restart=always
 RestartSec=5
-# Nested containers (Podman/LXC) reject mount namespaces, so the hardening
-# options that need them are intentionally omitted here. The service only
-# serves a static directory read-only and runs as a dedicated unprivileged user.
-User=nobody
-Group=nogroup
+# A dedicated system user, not "nobody" (systemd flags that as unsafe).
+User=xray-sub
+Group=xray-sub
+# No mount namespaces: nested Podman/LXC hosts reject them (status 226/NAMESPACE).
 NoNewPrivileges=true
 CapabilityBoundingSet=
 UMask=0027

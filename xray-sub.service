@@ -6,14 +6,13 @@ StartLimitBurst=10
 
 [Service]
 Type=simple
-ExecStart=/usr/bin/busybox httpd -f -p 127.0.0.1:__SUB_PORT__ -h /srv/sub
+ExecStart=__BUSYBOX__ httpd -f -p 127.0.0.1:__SUB_PORT__ -h /srv/sub
 Restart=always
 RestartSec=5
-# Nested containers (Podman/LXC) reject mount namespaces, so the hardening
-# options that need them are intentionally omitted here. The service only
-# serves a static directory read-only and runs as a dedicated unprivileged user.
-User=nobody
-Group=nogroup
+# A dedicated system user, not "nobody" (systemd flags that as unsafe).
+User=xray-sub
+Group=xray-sub
+# No mount namespaces: nested Podman/LXC hosts reject them (status 226/NAMESPACE).
 NoNewPrivileges=true
 CapabilityBoundingSet=
 UMask=0027
