@@ -140,10 +140,45 @@ setup_subscription() {
 
   systemctl daemon-reload
   systemctl enable xray-sub >/dev/null 2>&1 || true
+
+  # Some nested container hosts reject mount-namespace setup for any unit that
+  # requests it. Try the hardened unit first, then fall back to a minimal one
+  # instead of failing the whole installation.
   systemctl restart xray-sub
   sleep 2
+  if ! systemctl is-active --quiet xray-sub; then
+    if journalctl -u xray-sub -n 20 --no-pager 2>/dev/null | grep -q 'NAMESPACE\|Operation not supported'; then
+      echo '检测到嵌套容器不支持 mount namespace，改用精简服务配置' >&2
+      # busybox httpd reads its document root from -h; no namespacing needed.
+      cat > /etc/systemd/system/xray-sub.service <<UNIT
+[Unit]
+Description=Personal Clash subscription (minimal)
+After=network.target
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/busybox httpd -f -p 127.0.0.1:${sub_port} -h /srv/sub
+Restart=always
+RestartSec=5
+NoNewPrivileges=true
+CapabilityBoundingSet=
+UMask=0027
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target
+UNIT
+      chmod 644 /etc/systemd/system/xray-sub.service
+      systemctl daemon-reload
+      systemctl reset-failed xray-sub 2>/dev/null || true
+      systemctl restart xray-sub
+      sleep 2
+    fi
+  fi
+
   systemctl is-active --quiet xray-sub || {
-    journalctl -u xray-sub -n 15 --no-pager >&2 || true
+    journalctl -u xray-sub -n 20 --no-pager >&2 || true
     fail 'xray-sub 未能启动'
   }
   curl -fsS --max-time 5 "http://127.0.0.1:${sub_port}/cgi-bin/${token}" -o /dev/null \
