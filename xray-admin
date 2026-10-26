@@ -100,7 +100,7 @@ backup_all() {
 }
 
 set_quota() {
-  local f=/etc/xray-sub/userinfo
+  local f=/etc/xray-sub/userinfo backup="" tmp
   echo '设置订阅里显示的流量额度。Clash 会读取这些值显示用量。'
   echo '这是手动快照，不自动统计、限流或按月重置；expire 是套餐到期，不是重置日。'
   echo '留空使用 0；total=0 是否显示无限取决于客户端。真实余额请核对供应商后台。'
@@ -112,26 +112,46 @@ set_quota() {
   for v in "$up" "$down" "$total" "$expire"; do
     [[ $v =~ ^[0-9]+$ ]] || { echo '只接受非负整数'; return 1; }
   done
-  printf 'upload=%s; download=%s; total=%s; expire=%s\n' "$up" "$down" "$total" "$expire" > "$f"
-  chmod 640 "$f"
-  /usr/local/sbin/xray-sub >/dev/null || { echo '重新生成失败'; return 1; }
+  if [[ -f $f ]]; then
+    backup=$(mktemp)
+    cp -p "$f" "$backup" || { rm -f "$backup"; echo '无法备份现有额度'; return 1; }
+  fi
+  tmp=$(mktemp)
+  printf 'upload=%s; download=%s; total=%s; expire=%s\n' "$up" "$down" "$total" "$expire" > "$tmp"
+  if ! chown root:xray-sub "$tmp" || ! chmod 640 "$tmp"; then
+    rm -f "$tmp" "$backup"
+    echo '无法设置额度文件权限'
+    return 1
+  fi
+  mv -f "$tmp" "$f"
+  if ! /usr/local/sbin/xray-sub >/dev/null; then
+    if [[ -n $backup ]]; then cp -p "$backup" "$f"; else rm -f "$f"; fi
+    rm -f "$backup"
+    echo '重新生成失败，已恢复原额度设置'
+    return 1
+  fi
+  rm -f "$backup"
   echo '已保存。Clash 下拉刷新订阅即可看到额度。'
 }
 
 check_config() { XRAY_LOCATION_ASSET=/usr/local/share/xray /usr/local/bin/xray run -test -config /usr/local/etc/xray/config.json; }
 
 change_sub_port() {
-  local current
+  local current proxy_public internal new
   current=$(tr -d '\r\n' </etc/xray-sub/public_port 2>/dev/null || echo 2096)
+  proxy_public=$(jq -er .port "$state" 2>/dev/null || true)
   echo "当前订阅公网端口：$current"
-  local internal
   internal=$(cat "$sub_port_file") || return 1
   echo "只改对外地址，内部仍监听 $internal；平台映射由你自行配置。"
-  local new
   read -r -p '新的订阅公网端口（回车保持不变）: ' new
   if [[ -z $new ]]; then echo '未修改'; return 0; fi
   [[ $new =~ ^[1-9][0-9]{0,4}$ ]] || { echo '端口格式不正确'; return 1; }
   ((10#$new <= 65535)) || { echo '端口超出范围'; return 1; }
+  if [[ -n $proxy_public && $new == "$proxy_public" ]]; then
+    echo '订阅公网端口不能与代理公网端口相同'
+    return 1
+  fi
+  if [[ $new == "$current" ]]; then echo '未修改'; return 0; fi
   printf '%s\n' "$new" > /etc/xray-sub/public_port
   echo "已保存。新的订阅地址："
   sub_url
@@ -166,12 +186,21 @@ MENU
        ss -lntp
        systemctl show xray -p MemoryCurrent -p MemoryMax 2>/dev/null || true
        free -m;;
-    2) journalctl -u xray -n 40 --no-pager;;
-    3) if check_config; then systemctl restart xray; sleep 2; systemctl is-active xray; fi;;
+    2) journalctl -u xray -n 40 --no-pager || echo '日志读取失败';;
+    3) if check_config; then
+         if systemctl restart xray; then
+           sleep 2
+           systemctl is-active xray || echo 'Xray 未运行，请查看日志'
+         else
+           echo '重启失败，请查看日志'
+         fi
+       else
+         echo '配置检查失败，未重启'
+       fi;;
     4) show_sub || echo '订阅状态读取失败';;
     5) edit_rules "$sub_rules" || echo '规则未更新，原文件已保留或恢复';;
     6) echo '私有设备规则应在 FlClash 本地覆写中添加并备份；不在 VPS 创建或发布。';;
-    7) /usr/local/sbin/xray-sub && echo '已重新生成，FlClash 下拉刷新即可';;
+    7) /usr/local/sbin/xray-sub && echo '已重新生成，FlClash 下拉刷新即可' || echo '生成失败，请检查规则';;
     8) change_sub_port || echo '端口未修改';;
     9) set_quota || echo '额度未成功更新';;
     10) export_sub_info || echo '导出失败';;

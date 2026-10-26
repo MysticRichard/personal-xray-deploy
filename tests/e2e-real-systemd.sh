@@ -16,11 +16,11 @@ cp /work/install-xray.sh /work/xray-admin /work/rules.template.yaml \
    /work/xray-sub /work/xray-sub.service $workdir/
 
 export SERVER_ADDRESS=203.0.113.10
-export PUBLIC_PORT=34439
+export PUBLIC_PORT=28443
 export LISTEN_PORT=18443
 export REALITY_DEST=example.com:443
 export REALITY_SERVER_NAME=example.com
-export SUB_PUBLIC_PORT=34441
+export SUB_PUBLIC_PORT=28996
 export SUB_LISTEN_PORT=18996
 
 echo '=== install ==='

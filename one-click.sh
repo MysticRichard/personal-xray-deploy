@@ -3,7 +3,7 @@
 set -Eeuo pipefail
 set +x
 umask 077
-SCRIPT_VERSION=2026.10.26-review1
+SCRIPT_VERSION=2026.10.26-review2
 printf '个人 Xray 安装脚本 %s\n' "$SCRIPT_VERSION"
 [[ $EUID -eq 0 ]] || { echo '请使用 root 运行'; exit 1; }
 [[ -f /etc/debian_version && -d /run/systemd/system ]] || { echo '需要 Debian + systemd'; exit 1; }
@@ -16,27 +16,27 @@ done
 if ((missing)) || [[ ! -s /etc/ssl/certs/ca-certificates.crt ]]; then
   export DEBIAN_FRONTEND=noninteractive
   apt-get update -o Acquire::Retries=2 -o Acquire::http::Timeout=20 -o Acquire::https::Timeout=20
-  apt-get install -y --no-install-recommends ca-certificates curl openssl unzip jq iproute2 procps busybox nano
+  apt-get install -y --no-install-recommends -o DPkg::Lock::Timeout=60 ca-certificates curl openssl unzip jq iproute2 procps busybox nano
 fi
 for tool in curl openssl unzip jq ss free sha256sum timeout busybox nano; do
   command -v "$tool" >/dev/null || { echo "缺少依赖：$tool" >&2; exit 1; }
 done
 saved=/usr/local/etc/xray/client.json
-# Existing values are shown as defaults, but interactive runs always ask again.
-# Only NONINTERACTIVE=1 may consume state without prompting.
-if [[ -f $saved ]] && [[ ${NONINTERACTIVE:-0} == 1 ]]; then
-  SERVER_ADDRESS=${SERVER_ADDRESS:-$(jq -er .server "$saved")}
-  PUBLIC_PORT=${PUBLIC_PORT:-$(jq -er .port "$saved")}
-  LISTEN_PORT=${LISTEN_PORT:-$(jq -er '.listen_port // .port' "$saved")}
-  REALITY_SERVER_NAME=${REALITY_SERVER_NAME:-$(jq -er .server_name "$saved")}
+# Existing values are defaults for the prompts. Interactive runs still show and
+# read every item; NONINTERACTIVE=1 is the only mode that may skip prompting.
+if [[ -f $saved ]]; then
+  SERVER_ADDRESS=${SERVER_ADDRESS:-$(jq -er .server "$saved" 2>/dev/null || true)}
+  PUBLIC_PORT=${PUBLIC_PORT:-$(jq -er .port "$saved" 2>/dev/null || true)}
+  LISTEN_PORT=${LISTEN_PORT:-$(jq -er '.listen_port // .port' "$saved" 2>/dev/null || true)}
+  REALITY_SERVER_NAME=${REALITY_SERVER_NAME:-$(jq -er .server_name "$saved" 2>/dev/null || true)}
 fi
-if [[ -f /usr/local/etc/xray/config.json && ${NONINTERACTIVE:-0} == 1 ]]; then
-  REALITY_DEST=${REALITY_DEST:-$(jq -er '.inbounds[] | select(.tag == "personal") | .streamSettings.realitySettings | .target // .dest' /usr/local/etc/xray/config.json)}
+if [[ -f /usr/local/etc/xray/config.json ]]; then
+  REALITY_DEST=${REALITY_DEST:-$(jq -er '.inbounds[] | select(.tag == "personal") | .streamSettings.realitySettings | .target // .dest' /usr/local/etc/xray/config.json 2>/dev/null || true)}
 fi
-if [[ -s /etc/xray-sub/public_port && ${NONINTERACTIVE:-0} == 1 ]]; then
+if [[ -s /etc/xray-sub/public_port ]]; then
   SUB_PUBLIC_PORT=${SUB_PUBLIC_PORT:-$(tr -d '\r\n' </etc/xray-sub/public_port)}
 fi
-if [[ -s /etc/xray-sub/port && ${NONINTERACTIVE:-0} == 1 ]]; then
+if [[ -s /etc/xray-sub/port ]]; then
   SUB_LISTEN_PORT=${SUB_LISTEN_PORT:-$(tr -d '\r\n' </etc/xray-sub/port)}
 fi
 # Every interactive run shows all seven settings. Existing values are defaults,
@@ -61,8 +61,8 @@ ask REALITY_DEST 'REALITY 目标 host:port（默认值并不保证防封，安�
 # A custom target should not silently retain the Microsoft SNI.
 default_sni=${REALITY_DEST%:*}
 ask REALITY_SERVER_NAME 'REALITY serverName' "$default_sni"
-ask SUB_PUBLIC_PORT '订阅公网 TCP 端口' "${SUB_PUBLIC_PORT:-}"
-ask SUB_LISTEN_PORT '订阅内部 TCP 端口（无 NAT 时与公网相同）' "${SUB_LISTEN_PORT:-}"
+ask SUB_PUBLIC_PORT '订阅公网 TCP 端口（平台外部端口，可任意）' "${SUB_PUBLIC_PORT:-}"
+ask SUB_LISTEN_PORT '订阅内部 TCP 端口（须 ≥1024；无 NAT 时与公网相同）' "${SUB_LISTEN_PORT:-}"
 export SERVER_ADDRESS PUBLIC_PORT LISTEN_PORT REALITY_DEST REALITY_SERVER_NAME SUB_PUBLIC_PORT SUB_LISTEN_PORT
 printf '\n代理 公网 %s:%s -> 内部 TCP %s\n订阅 公网 %s:%s -> 内部 TCP %s\n目标 %s\n' \
   "$SERVER_ADDRESS" "$PUBLIC_PORT" "$LISTEN_PORT" "$SERVER_ADDRESS" "$SUB_PUBLIC_PORT" "$SUB_LISTEN_PORT" "$REALITY_DEST"
@@ -97,6 +97,10 @@ validate() {
   SUB_PUBLIC_PORT=${SUB_PUBLIC_PORT:-$SUB_LISTEN_PORT}
   valid_port "$LISTEN_PORT" && valid_port "$PUBLIC_PORT" || fail 'Invalid public/listen port.'
   valid_port "$SUB_LISTEN_PORT" || fail 'Invalid subscription listen port.'
+  # The HTTP service runs as a dedicated non-root user and has no bind
+  # capability. A public port below 1024 is still fine when the platform
+  # forwards it, but the internal listener must be unprivileged.
+  ((10#$SUB_LISTEN_PORT >= 1024)) || fail 'Subscription listen port must be >= 1024; the HTTP service runs as a non-root user. Use a platform port-forward for 80/443.'
   valid_port "$SUB_PUBLIC_PORT" || fail 'Invalid subscription public port.'
   [[ $SUB_LISTEN_PORT != "$LISTEN_PORT" ]] || fail 'Subscription port must differ from the proxy port.'
   [[ $SUB_PUBLIC_PORT != "$PUBLIC_PORT" ]] || fail 'Subscription public port must differ from the proxy public port.'
@@ -134,6 +138,23 @@ port_is_free_or_owned() {
   if ss -lntHp "sport = :$port" 2>/dev/null | grep -q .; then
     service_owns_port "$port" "$unit" || fail "TCP port $port is occupied by another process."
   fi
+}
+# A REALITY target is contacted by this server. Reject addresses that are not
+# usable public destinations so a typo cannot turn the target into an internal
+# service probe.
+reject_private_target_address() {
+  local address=${1,,}
+  [[ -n $address ]] || return 1
+  case "$address" in
+    ::ffff:*) address=${address#::ffff:} ;;
+  esac
+  case "$address" in
+    10.*|127.*|0.*|169.254.*|192.168.*|172.1[6-9].*|172.2[0-9].*|172.3[01].*|100.6[4-9].*|100.[7-9][0-9].*|100.1[01][0-9].*|100.11[0-9].*|100.12[0-7].*|198.1[89].*|192.0.0.*|192.0.2.*|198.51.100.*|203.0.113.*|22[4-9].*|2[4-5][0-9].*)
+      return 0;;
+    ::1|::|fc*|fd*|fe8*|fe9*|fea*|feb*|ff*|2001:db8:*)
+      return 0;;
+  esac
+  return 1
 }
 
 validate_secrets() {
@@ -204,12 +225,17 @@ preflight() {
     [[ $old_port == "$LISTEN_PORT" ]] || fail 'Requested port is occupied; use the existing instance port or an unused port.'
   fi
   port_is_free_or_owned "$SUB_LISTEN_PORT" xray-sub
-  local address
+  local addresses address found=0
+  if ! addresses=$(timeout 10 getent ahosts "$DEST_HOST" 2>/dev/null | awk '{print $1}' | sort -u); then
+    fail 'REALITY target DNS resolution failed or timed out.'
+  fi
+  [[ -n $addresses ]] || fail 'REALITY target did not resolve to any address.'
   while read -r address; do
-    case "$address" in
-      10.*|127.*|0.*|169.254.*|192.168.*|172.1[6-9].*|172.2[0-9].*|172.3[01].*) fail 'REALITY target resolved to a local/private IPv4 address.';;
-    esac
-  done < <(getent ahostsv4 "$DEST_HOST" | awk '{print $1}' | sort -u)
+    [[ -n $address ]] || continue
+    found=1
+    reject_private_target_address "$address" && fail "REALITY target resolved to a non-public address: $address"
+  done <<< "$addresses"
+  ((found)) || fail 'REALITY target did not resolve to any address.'
   local probe
   probe=$(timeout 15 openssl s_client -connect "$REALITY_DEST" -servername "$REALITY_SERVER_NAME" -verify_hostname "$REALITY_SERVER_NAME" -verify_return_error -tls1_3 -alpn h2 </dev/null 2>&1) || fail 'Target TLS/certificate check failed.'
   [[ $probe == *TLSv1.3* && $probe == *'ALPN protocol: h2'* ]] || fail 'Target did not negotiate TLS1.3 and h2.'
@@ -225,7 +251,8 @@ preflight() {
   echo 'PASS: preflight. Public NAT mapping and client reachability still need external verification.'
 }
 
-# Build the subscription service: editable rules + static HTTP on localhost.
+# Build the subscription service: public rules + static HTTP on the instance
+# interface (the platform forwards the public port here).
 # The public port is separate from the guest listen port, so the caller may
 # expose it through its own port-forward table.
 setup_subscription() {
@@ -428,8 +455,10 @@ install_node() {  preflight
   snapshot subweb /srv/sub
   snapshot subunit /etc/systemd/system/xray-sub.service
   snapshot subbin /usr/local/sbin/xray-sub
+  echo 'STEP: download release' >&2
   curl --fail --location --retry 2 --max-time 180 "https://github.com/XTLS/Xray-core/releases/download/$VERSION/Xray-linux-64.zip" -o "$stage/core.zip"
   printf '%s  %s\n' "$ARCHIVE_SHA256" "$stage/core.zip" | sha256sum --check --status || fail 'Release checksum mismatch.'
+  echo 'STEP: extract release' >&2
   # Decompress only what is needed, and drop the archive immediately: on a
   # 128 MB cgroup these few tens of MB of page cache matter for the first start.
   unzip -q -j "$stage/core.zip" xray geoip.dat -d "$stage/core"
@@ -451,6 +480,7 @@ install_node() {  preflight
     PRIVATE_KEY=$(printf '%s\n' "$keys" | awk -F': *' '/^(PrivateKey|Private key):/ {print $2; exit}')
     PUBLIC_KEY=$(printf '%s\n' "$keys" | awk -F': *' '/^(Password \(PublicKey\)|Password|PublicKey|Public key):/ {print $2; exit}')
   fi
+  echo 'STEP: render and validate config' >&2
   render "$stage/config.json"
   XRAY_LOCATION_ASSET="$stage/core" "$stage/core/xray" run -test -config "$stage/config.json"
   jq -n --arg uuid "$CLIENT_UUID" --arg private_key "$PRIVATE_KEY" --arg public_key "$PUBLIC_KEY" --arg short_id "$SHORT_ID" --arg server "$SERVER_ADDRESS" --argjson port "$PUBLIC_PORT" --argjson listen_port "$LISTEN_PORT" --arg server_name "$REALITY_SERVER_NAME" '{uuid:$uuid, private_key:$private_key, public_key:$public_key, short_id:$short_id, server:$server, port:$port, listen_port:$listen_port, server_name:$server_name}' > "$stage/client.json"
@@ -494,6 +524,7 @@ LogRateLimitBurst=20
 WantedBy=multi-user.target
 EOF
   changed=1
+  echo 'STEP: install files' >&2
   install -m 755 "$stage/core/xray" "$BIN.new"
   mv -f "$BIN.new" "$BIN"
   install -m 644 "$stage/core/geoip.dat" "$ASSETS/geoip.dat"
@@ -507,9 +538,11 @@ EOF
   rm -rf "$stage"
   sync
   # Build and validate every subscription payload before touching either service.
+  echo 'STEP: prepare subscription' >&2
   setup_subscription 0
   systemctl daemon-reload
   systemctl enable xray
+  echo 'STEP: activate services' >&2
   local attempt
   for attempt in 1 2 3; do
     systemctl restart xray || true
@@ -647,7 +680,7 @@ backup_all() {
 }
 
 set_quota() {
-  local f=/etc/xray-sub/userinfo
+  local f=/etc/xray-sub/userinfo backup="" tmp
   echo '设置订阅里显示的流量额度。Clash 会读取这些值显示用量。'
   echo '这是手动快照，不自动统计、限流或按月重置；expire 是套餐到期，不是重置日。'
   echo '留空使用 0；total=0 是否显示无限取决于客户端。真实余额请核对供应商后台。'
@@ -659,26 +692,46 @@ set_quota() {
   for v in "$up" "$down" "$total" "$expire"; do
     [[ $v =~ ^[0-9]+$ ]] || { echo '只接受非负整数'; return 1; }
   done
-  printf 'upload=%s; download=%s; total=%s; expire=%s\n' "$up" "$down" "$total" "$expire" > "$f"
-  chmod 640 "$f"
-  /usr/local/sbin/xray-sub >/dev/null || { echo '重新生成失败'; return 1; }
+  if [[ -f $f ]]; then
+    backup=$(mktemp)
+    cp -p "$f" "$backup" || { rm -f "$backup"; echo '无法备份现有额度'; return 1; }
+  fi
+  tmp=$(mktemp)
+  printf 'upload=%s; download=%s; total=%s; expire=%s\n' "$up" "$down" "$total" "$expire" > "$tmp"
+  if ! chown root:xray-sub "$tmp" || ! chmod 640 "$tmp"; then
+    rm -f "$tmp" "$backup"
+    echo '无法设置额度文件权限'
+    return 1
+  fi
+  mv -f "$tmp" "$f"
+  if ! /usr/local/sbin/xray-sub >/dev/null; then
+    if [[ -n $backup ]]; then cp -p "$backup" "$f"; else rm -f "$f"; fi
+    rm -f "$backup"
+    echo '重新生成失败，已恢复原额度设置'
+    return 1
+  fi
+  rm -f "$backup"
   echo '已保存。Clash 下拉刷新订阅即可看到额度。'
 }
 
 check_config() { XRAY_LOCATION_ASSET=/usr/local/share/xray /usr/local/bin/xray run -test -config /usr/local/etc/xray/config.json; }
 
 change_sub_port() {
-  local current
+  local current proxy_public internal new
   current=$(tr -d '\r\n' </etc/xray-sub/public_port 2>/dev/null || echo 2096)
+  proxy_public=$(jq -er .port "$state" 2>/dev/null || true)
   echo "当前订阅公网端口：$current"
-  local internal
   internal=$(cat "$sub_port_file") || return 1
   echo "只改对外地址，内部仍监听 $internal；平台映射由你自行配置。"
-  local new
   read -r -p '新的订阅公网端口（回车保持不变）: ' new
   if [[ -z $new ]]; then echo '未修改'; return 0; fi
   [[ $new =~ ^[1-9][0-9]{0,4}$ ]] || { echo '端口格式不正确'; return 1; }
   ((10#$new <= 65535)) || { echo '端口超出范围'; return 1; }
+  if [[ -n $proxy_public && $new == "$proxy_public" ]]; then
+    echo '订阅公网端口不能与代理公网端口相同'
+    return 1
+  fi
+  if [[ $new == "$current" ]]; then echo '未修改'; return 0; fi
   printf '%s\n' "$new" > /etc/xray-sub/public_port
   echo "已保存。新的订阅地址："
   sub_url
@@ -713,12 +766,21 @@ MENU
        ss -lntp
        systemctl show xray -p MemoryCurrent -p MemoryMax 2>/dev/null || true
        free -m;;
-    2) journalctl -u xray -n 40 --no-pager;;
-    3) if check_config; then systemctl restart xray; sleep 2; systemctl is-active xray; fi;;
+    2) journalctl -u xray -n 40 --no-pager || echo '日志读取失败';;
+    3) if check_config; then
+         if systemctl restart xray; then
+           sleep 2
+           systemctl is-active xray || echo 'Xray 未运行，请查看日志'
+         else
+           echo '重启失败，请查看日志'
+         fi
+       else
+         echo '配置检查失败，未重启'
+       fi;;
     4) show_sub || echo '订阅状态读取失败';;
     5) edit_rules "$sub_rules" || echo '规则未更新，原文件已保留或恢复';;
     6) echo '私有设备规则应在 FlClash 本地覆写中添加并备份；不在 VPS 创建或发布。';;
-    7) /usr/local/sbin/xray-sub && echo '已重新生成，FlClash 下拉刷新即可';;
+    7) /usr/local/sbin/xray-sub && echo '已重新生成，FlClash 下拉刷新即可' || echo '生成失败，请检查规则';;
     8) change_sub_port || echo '端口未修改';;
     9) set_quota || echo '额度未成功更新';;
     10) export_sub_info || echo '导出失败';;
@@ -808,8 +870,9 @@ port=$(jq -er .port "$STATE")
 sni=$(jq -er .server_name "$STATE")
 [[ $uuid =~ ^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$ ]] || die '状态中的 UUID 不正确'
 [[ $pub =~ ^[A-Za-z0-9_-]{43}$ && $sid =~ ^[0-9a-fA-F]{16}$ ]] || die '状态中的 Reality 公钥或 short-id 不正确'
-[[ $server =~ ^[A-Za-z0-9][A-Za-z0-9.:-]*$ ]] || die '状态中的服务器地址不正确'
-[[ $sni =~ ^[A-Za-z0-9][A-Za-z0-9.-]*$ ]] || die '状态中的 serverName 不正确'
+host_re='^[A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?(\.[A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?)*$'
+[[ ${#server} -le 253 && $server =~ $host_re ]] || die '状态中的服务器地址不正确'
+[[ ${#sni} -le 253 && $sni =~ $host_re ]] || die '状态中的 serverName 不正确'
 [[ $port =~ ^[1-9][0-9]{0,4}$ ]] && ((10#$port <= 65535)) || die '状态中的端口不正确'
 
 # The CGI service needs directory traversal but must not gain access to root-only files.
@@ -918,6 +981,7 @@ cat > "$cgi_tmp" <<CGI
 # Subscription for token $TOKEN: quota headers + config body.
 set -eu
 printf 'Content-Type: text/yaml; charset=utf-8\r\n'
+printf 'Cache-Control: no-store\r\n'
 if [ -s "$USERINFO" ]; then
   quota=\$(cat "$USERINFO")
   if printf '%s\n' "\$quota" | awk 'NR == 1 && \$0 ~ /^upload=[0-9]+; download=[0-9]+; total=[0-9]+; expire=[0-9]+$/ {ok=1} NR > 1 {ok=0} END {exit ok ? 0 : 1}'; then

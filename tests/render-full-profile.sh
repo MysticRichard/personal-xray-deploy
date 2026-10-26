@@ -7,7 +7,6 @@ trap 'rm -rf "$work"' EXIT
 mkdir -p "$work/state"
 sed -e "s#^STATE=.*#STATE=$work/state/client.json#" \
     -e "s#^RULES=.*#RULES=/work/rules.template.yaml#" \
-    -e "s#^RULES_LOCAL=.*#RULES_LOCAL=$work/state/no-private.yaml#" \
     -e "s#^TOKEN_FILE=.*#TOKEN_FILE=$work/state/token#" \
     -e "s#^SUB_PORT_FILE=.*#SUB_PORT_FILE=$work/state/port#" \
     -e "s#^USERINFO=.*#USERINFO=$work/state/userinfo#" \

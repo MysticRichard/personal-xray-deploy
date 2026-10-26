@@ -76,8 +76,9 @@ port=$(jq -er .port "$STATE")
 sni=$(jq -er .server_name "$STATE")
 [[ $uuid =~ ^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$ ]] || die '状态中的 UUID 不正确'
 [[ $pub =~ ^[A-Za-z0-9_-]{43}$ && $sid =~ ^[0-9a-fA-F]{16}$ ]] || die '状态中的 Reality 公钥或 short-id 不正确'
-[[ $server =~ ^[A-Za-z0-9][A-Za-z0-9.:-]*$ ]] || die '状态中的服务器地址不正确'
-[[ $sni =~ ^[A-Za-z0-9][A-Za-z0-9.-]*$ ]] || die '状态中的 serverName 不正确'
+host_re='^[A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?(\.[A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?)*$'
+[[ ${#server} -le 253 && $server =~ $host_re ]] || die '状态中的服务器地址不正确'
+[[ ${#sni} -le 253 && $sni =~ $host_re ]] || die '状态中的 serverName 不正确'
 [[ $port =~ ^[1-9][0-9]{0,4}$ ]] && ((10#$port <= 65535)) || die '状态中的端口不正确'
 
 # The CGI service needs directory traversal but must not gain access to root-only files.
@@ -186,6 +187,7 @@ cat > "$cgi_tmp" <<CGI
 # Subscription for token $TOKEN: quota headers + config body.
 set -eu
 printf 'Content-Type: text/yaml; charset=utf-8\r\n'
+printf 'Cache-Control: no-store\r\n'
 if [ -s "$USERINFO" ]; then
   quota=\$(cat "$USERINFO")
   if printf '%s\n' "\$quota" | awk 'NR == 1 && \$0 ~ /^upload=[0-9]+; download=[0-9]+; total=[0-9]+; expire=[0-9]+$/ {ok=1} NR > 1 {ok=0} END {exit ok ? 0 : 1}'; then

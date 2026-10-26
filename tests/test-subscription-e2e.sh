@@ -23,23 +23,25 @@ sed -i "s#__SELF__#$root#; s#__PORT__#$SUB_PORT#" /run/sub-fn.sh
 bash /run/sub-fn.sh > /run/sub.log 2>&1 || { cat /run/sub.log; exit 1; }
 
 token=$(tr -d '\r\n' </etc/xray-sub/token)
-url="http://127.0.0.1:${SUB_PORT}/${token}/config.yaml"
+url="http://127.0.0.1:${SUB_PORT}/cgi-bin/${token}"
 code=$(curl -s -o /run/sub.yaml -w '%{http_code}' --max-time 5 "$url")
 [[ $code == 200 ]] || { echo "FAIL: subscription HTTP $code"; cat /run/sub.log; exit 1; }
 python3 - /run/sub.yaml <<'PY'
 import sys, yaml
 d = yaml.safe_load(open(sys.argv[1]))
 assert d['proxies'][0]['type'] == 'vless'
-assert d['proxies'][0]['port'] == 34439, 'must publish the public port'
+assert d['proxies'][0]['port'] == 28443, 'must publish the public port'
 assert d['rules'][-1] == 'MATCH,PROXY'
 assert len(d['rules']) > 10, 'rules template did not land'
-assert 'private' not in str(d).lower(), 'server secret leaked'
+blob = str(d).lower()
+assert 'private-key' not in blob and 'privatekey' not in blob, 'server key field leaked'
 PY
 # Directory listing must not be exposed.
 [[ $(curl -s -o /dev/null -w '%{http_code}' --max-time 5 "http://127.0.0.1:${SUB_PORT}/${token}/") == 404 ]] \
   || { echo 'FAIL: directory listing exposed'; exit 1; }
-# Editing rules and regenerating must be reflected without restarting.
-printf '%s\n' '- DOMAIN-SUFFIX,edited.example,PROXY' '- MATCH,PROXY' >> /etc/xray-sub/rules.yaml
+# Editing rules and regenerating must be reflected without restarting. Insert
+# before MATCH; a rule after MATCH is intentionally rejected.
+sed -i 's/^- MATCH,PROXY$/- DOMAIN-SUFFIX,edited.example,PROXY\n- MATCH,PROXY/' /etc/xray-sub/rules.yaml
 /usr/local/sbin/xray-sub >/dev/null
 curl -s --max-time 5 "$url" | grep -q 'edited.example' || { echo 'FAIL: rule edit not applied'; exit 1; }
 # Malformed rules must fail and leave the served file untouched.

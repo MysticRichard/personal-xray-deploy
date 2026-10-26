@@ -8,25 +8,27 @@
 bash <(curl -fsSL https://raw.githubusercontent.com/MysticRichard/personal-xray-deploy/main/one-click.sh)
 ```
 
-安装过程会问五项，其中只有前三项必须填：
+安装过程会依次询问七项。第 4、5 项有默认值，其余按平台实际填写；重复安装会把已保存值作为默认值显示，但仍会逐项询问：
 
 | # | 项目 | 说明 |
 |---|---|---|
 | 1 | 公网 IP 或域名 | 平台显示的公网地址 |
-| 2 | 公网 TCP 端口 | 端口转发表的「外部端口」 |
-| 3 | 内部 TCP 端口 | 端口转发表的「内部端口」；无 NAT 时与公网端口相同 |
-| 4 | REALITY 目标 | 直接回车用 `www.microsoft.com:443` |
-| 5 | serverName | 直接回车用 `www.microsoft.com` |
+| 2 | 代理公网 TCP 端口 | 端口转发表的「外部端口」 |
+| 3 | 代理内部 TCP 端口 | 端口转发表的「内部端口」；无 NAT 时与公网端口相同 |
+| 4 | REALITY 目标 | 默认 `www.microsoft.com:443`，仅作起始值；每次安装都会复验 TLS 1.3、h2 和证书，可按需换成自己的目标 |
+| 5 | serverName | 默认跟随目标域名，必须与目标 host 一致 |
+| 6 | 订阅公网 TCP 端口 | 端口转发表的订阅「外部端口」 |
+| 7 | 订阅内部 TCP 端口 | 必须 ≥1024；订阅 HTTP 服务以非 root 用户运行 |
 
 装完会直接打印订阅地址：
 
 ```text
 订阅地址（复制到 FlClash 的「订阅」里）：
 
-  http://<公网地址>:<端口>/<令牌>/config.yaml
+  http://<公网地址>:<订阅公网端口>/cgi-bin/<令牌>
 ```
 
-粘进 FlClash 就能用，不需要手动填节点。
+粘进 FlClash 就能用，不需要手动填节点。订阅目前是 **HTTP**：随机令牌只控制访问，不加密传输；不要把这个地址发到公开地方。
 
 ## 日常维护
 
@@ -39,33 +41,35 @@ xray-admin
 2. 最近日志
 3. 检查配置并重启
 4. 查看订阅地址
-5. 编辑分流规则
-6. 重新生成订阅
-7. 备份
-8. 导出客户端节点
+5. 编辑通用规则（rules.yaml）
+6. 私有规则迁移说明
+7. 重新生成订阅
+8. 修改订阅公网端口
+9. 设置流量额度（手动快照）
+10. 导出订阅信息到文件
+11. 备份
+12. 导出客户端节点
 0. 退出
 ```
 
 ## 规则怎么改
 
-两条规则文件：
-
-| 文件 | 用途 |
-|---|---|
-| `/etc/xray-sub/rules.yaml` | 通用规则，随仓库公开 |
-| FlClash 本地覆写文件 | 你的私有设备规则，只保存在客户端 |
-
-私有规则排在通用规则之前，优先匹配。
+VPS 只保存一份公共规则 `/etc/xray-sub/rules.yaml`，随订阅下发：
 
 ```bash
 xray-admin
-# 5 编辑通用规则
-# 6 编辑私有规则
+# 5 编辑公共规则
 ```
 
 改完自动重新生成，FlClash 下拉刷新即可。格式不对会拒绝生成，不会破坏已有订阅。
 
-详见 [docs/subscription.md](docs/subscription.md)。
+你的 NAS、Tailscale、内网设备规则**只放在客户端**，不要上传 VPS：
+
+1. 在 FlClash 的本地覆写/脚本中，把私有规则放在公共规则和 `MATCH,PROXY` 之前。
+2. 可参考仓库里的 `client-private.example.yaml`；它只有示例地址，不含真实设备。
+3. 不要直接把订阅里的 `rules:` 整段替换成私有规则，否则会丢失公共分流。
+
+公共规则不包含你的设备域名、私有 IP 或 Tailscale 地址。详见 [docs/subscription.md](docs/subscription.md)。
 
 ## 为什么规则不放进 Xray
 
@@ -80,6 +84,9 @@ xray-admin
 - 订阅和代理都需要在云平台做好端口转发。
 - 配置能降低被动识别概率，但不保证 IP 永不被封。
 - 128 MB 是下限，已针对性做内存优化，但仍建议条件允许时升级。
+- 订阅是 HTTP，令牌只控制访问，不加密传输。
+- 流量额度是手动显示快照，不自动统计、限流或按月重置；真实套餐以供应商后台为准。
+- 私有设备规则只保存在客户端 FlClash，不进 VPS、不进订阅、不进公开仓库。
 
 ## 文件说明
 
@@ -89,7 +96,8 @@ xray-admin
 | `install-xray.sh` | 安装器本体，供分步执行或诊断 |
 | `xray-sub` | 从规则模板生成订阅 |
 | `xray-admin` | 中文维护菜单 |
-| `rules.template.yaml` | 规则模板，安装时复制到 `/etc/xray-sub/rules.yaml` |
+| `rules.template.yaml` | 公共规则模板，安装时复制到 `/etc/xray-sub/rules.yaml` |
+| `client-private.example.yaml` | 客户端私有规则示例，不含真实设备 |
 | `generate-flclash-profile.ps1` | 备选：把节点直接合并进已有 FlClash 配置 |
 | `check-vps.sh` | 只读环境检查 |
 | `probe-targets.sh` | 只读目标站检测 |
@@ -99,12 +107,13 @@ xray-admin
 ## 测试
 
 ```bash
-bash tests/test-subscription.sh     # 订阅生成与校验
-bash tests/test-public-bundle.sh    # 无实例参数或凭据泄露
-bash tests/test-preflight-http.sh   # 预检策略回归
+bash tests/test-validation-behaviour.sh   # 参数/端口校验真实行为
+bash tests/test-entrypoint-prompts.sh     # 七项交互与默认值
+bash tests/test-public-bundle.sh          # 无实例参数或凭据泄露
+bash tests/test-preflight-http.sh         # 预检策略回归
 ```
 
-Windows 侧生成器测试：
+完整回归和真实 systemd 安装测试需要 review 容器，命令见 [`tests/README.md`](tests/README.md)。Windows 侧生成器测试：
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File tests/test-generate-flclash-profile.ps1

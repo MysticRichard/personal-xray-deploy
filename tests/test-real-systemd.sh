@@ -23,7 +23,8 @@ fail() {
 [[ -f /release.zip ]] || fail 'release fixture /release.zip is missing'
 
 payload=$(mktemp -d /run/xray-real-systemd.payload.XXXXXX)
-shimdir=$(mktemp -d /run/xray-real-systemd.shims.XXXXXX)
+# /run may be mounted noexec; shims must live on an executable filesystem.
+shimdir=$(mktemp -d /tmp/xray-real-systemd.shims.XXXXXX)
 request_dir=$(mktemp -d /run/xray-real-systemd.requests.XXXXXX)
 chmod 733 "$request_dir"
 
@@ -32,6 +33,10 @@ cleanup_node() {
   systemctl stop xray "$sub_service" >/dev/null 2>&1
   systemctl disable xray "$sub_service" >/dev/null 2>&1
   systemctl reset-failed xray "$sub_service" >/dev/null 2>&1
+  # Earlier shim-based tests can leave processes that systemd never owned.
+  pkill -x xray >/dev/null 2>&1
+  pkill -f 'busybox httpd.*-h /srv/sub' >/dev/null 2>&1
+  rm -f /run/test-xray.pid /run/test-sub.pid
   rm -rf \
     /usr/local/etc/xray \
     /usr/local/share/xray \
@@ -75,6 +80,8 @@ set -Eeuo pipefail
 args=("$@")
 last=${args[${#args[@]}-1]}
 output=
+url=
+local_url=
 write_status=0
 for ((i = 0; i < ${#args[@]}; i++)); do
   case ${args[i]} in
@@ -85,18 +92,22 @@ for ((i = 0; i < ${#args[@]}; i++)); do
     -w|--write-out)
       write_status=1
       ;;
+    *releases/download*)
+      url=${args[i]}
+      ;;
+    http://127.0.0.1:*|http://localhost:*)
+      local_url=${args[i]}
+      ;;
   esac
 done
-if [[ $last == *releases/download* ]]; then
+if [[ -n $url ]]; then
   [[ -n $output && $output != - ]] || exit 2
   cp -- /release.zip "$output"
   exit 0
 fi
-case $last in
-  http://127.0.0.1:*|http://localhost:*)
-    exec /usr/bin/curl "$@"
-    ;;
-esac
+if [[ -n $local_url ]]; then
+  exec /usr/bin/curl "$@"
+fi
 if ((write_status)); then
   printf '200'
   exit 0
@@ -118,17 +129,30 @@ export PATH=$shimdir:$PATH
 
 systemctl --version 2>/dev/null | grep -q '^systemd ' || fail 'systemctl is not the real systemd client'
 [[ ! -e $shimdir/systemctl ]] || fail 'systemctl was shimmed'
-getent ahostsv4 example.com >/dev/null 2>&1 || fail 'real getent cannot resolve example.com'
+# The review host may use a fake-ip resolver (198.18.0.0/15). Pin a real public
+# address for the target so the installer's non-public target guard is exercised
+# without depending on the host's DNS mode.
+if ! grep -q '^1\.1\.1\.1[[:space:]]\+target\.example$' /etc/hosts; then
+  sed -i '/[[:space:]]target\.example$/d' /etc/hosts 2>/dev/null || true
+  printf '1.1.1.1 target.example\n' >>/etc/hosts
+fi
+getent ahosts target.example | grep -q '^1\.1\.1\.1' || fail 'real getent cannot resolve the pinned target'
 
 export SERVER_ADDRESS=203.0.113.10
-export PUBLIC_PORT=34439
+export PUBLIC_PORT=28443
 export LISTEN_PORT=$proxy_port
-export REALITY_DEST=example.com:443
-export REALITY_SERVER_NAME=example.com
-export SUB_PUBLIC_PORT=34441
+export REALITY_DEST=target.example:443
+export REALITY_SERVER_NAME=target.example
+export SUB_PUBLIC_PORT=28996
 export SUB_LISTEN_PORT=$sub_port
 
-if ! bash "$payload/install-xray.sh" --install >/dev/null 2>&1; then
+if ! bash "$payload/install-xray.sh" --install >"$request_dir/install.log" 2>&1; then
+  cat "$request_dir/install.log" >&2
+  echo "DIAG openssl=$(command -v openssl) curl=$(command -v curl) PATH=$PATH" >&2
+  ls -l "$shimdir" >&2 || true
+  getent ahosts target.example >&2 || true
+  timeout 15 openssl s_client -connect target.example:443 -servername target.example \
+    -verify_hostname target.example -verify_return_error -tls1_3 -alpn h2 </dev/null >&2 || true
   fail 'initial real-systemd install failed'
 fi
 

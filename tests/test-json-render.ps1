@@ -3,8 +3,8 @@ $root = Split-Path -Parent $PSScriptRoot
 $temp = Join-Path $env:TEMP ('xray-render-' + [guid]::NewGuid().ToString() + '.json')
 $bash = 'C:\Program Files\Git\bin\bash.exe'
 $env:SERVER_ADDRESS = '203.0.113.10'
-$env:LISTEN_PORT = '2082'
-$env:PUBLIC_PORT = '34439'
+$env:LISTEN_PORT = '18444'
+$env:PUBLIC_PORT = '28443'
 $env:REALITY_DEST = 'example.com:443'
 $env:REALITY_SERVER_NAME = 'example.com'
 $env:CLIENT_UUID = '11111111-1111-4111-8111-111111111111'
@@ -16,7 +16,7 @@ try {
     if ($LASTEXITCODE -ne 0) { throw 'Real script rendering failed' }
     $c = Get-Content -LiteralPath $temp -Raw | ConvertFrom-Json
     if ($c.inbounds.Count -ne 1) { throw 'Unauthenticated extra listeners' }
-    if ($c.inbounds[0].port -ne 2082) { throw 'Wrong internal listen port' }
+    if ($c.inbounds[0].port -ne 18444) { throw 'Wrong internal listen port' }
     if ($c.routing.domainStrategy -ne 'IPOnDemand') { throw 'IP rules bypass domain targets' }
     if ('geoip:private' -notin $c.routing.rules[0].ip) { throw 'Private IP protection missing' }
     if ($c.inbounds[0].streamSettings.realitySettings.shortIds.Count -ne 1) { throw 'Unneeded extra short IDs' }

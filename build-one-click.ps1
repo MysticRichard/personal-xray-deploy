@@ -11,7 +11,7 @@ $header = @'
 set -Eeuo pipefail
 set +x
 umask 077
-SCRIPT_VERSION=2026.10.26-review1
+SCRIPT_VERSION=2026.10.26-review2
 printf '个人 Xray 安装脚本 %s\n' "$SCRIPT_VERSION"
 [[ $EUID -eq 0 ]] || { echo '请使用 root 运行'; exit 1; }
 [[ -f /etc/debian_version && -d /run/systemd/system ]] || { echo '需要 Debian + systemd'; exit 1; }
@@ -24,27 +24,27 @@ done
 if ((missing)) || [[ ! -s /etc/ssl/certs/ca-certificates.crt ]]; then
   export DEBIAN_FRONTEND=noninteractive
   apt-get update -o Acquire::Retries=2 -o Acquire::http::Timeout=20 -o Acquire::https::Timeout=20
-  apt-get install -y --no-install-recommends ca-certificates curl openssl unzip jq iproute2 procps busybox nano
+  apt-get install -y --no-install-recommends -o DPkg::Lock::Timeout=60 ca-certificates curl openssl unzip jq iproute2 procps busybox nano
 fi
 for tool in curl openssl unzip jq ss free sha256sum timeout busybox nano; do
   command -v "$tool" >/dev/null || { echo "缺少依赖：$tool" >&2; exit 1; }
 done
 saved=/usr/local/etc/xray/client.json
-# Existing values are shown as defaults, but interactive runs always ask again.
-# Only NONINTERACTIVE=1 may consume state without prompting.
-if [[ -f $saved ]] && [[ ${NONINTERACTIVE:-0} == 1 ]]; then
-  SERVER_ADDRESS=${SERVER_ADDRESS:-$(jq -er .server "$saved")}
-  PUBLIC_PORT=${PUBLIC_PORT:-$(jq -er .port "$saved")}
-  LISTEN_PORT=${LISTEN_PORT:-$(jq -er '.listen_port // .port' "$saved")}
-  REALITY_SERVER_NAME=${REALITY_SERVER_NAME:-$(jq -er .server_name "$saved")}
+# Existing values are defaults for the prompts. Interactive runs still show and
+# read every item; NONINTERACTIVE=1 is the only mode that may skip prompting.
+if [[ -f $saved ]]; then
+  SERVER_ADDRESS=${SERVER_ADDRESS:-$(jq -er .server "$saved" 2>/dev/null || true)}
+  PUBLIC_PORT=${PUBLIC_PORT:-$(jq -er .port "$saved" 2>/dev/null || true)}
+  LISTEN_PORT=${LISTEN_PORT:-$(jq -er '.listen_port // .port' "$saved" 2>/dev/null || true)}
+  REALITY_SERVER_NAME=${REALITY_SERVER_NAME:-$(jq -er .server_name "$saved" 2>/dev/null || true)}
 fi
-if [[ -f /usr/local/etc/xray/config.json && ${NONINTERACTIVE:-0} == 1 ]]; then
-  REALITY_DEST=${REALITY_DEST:-$(jq -er '.inbounds[] | select(.tag == "personal") | .streamSettings.realitySettings | .target // .dest' /usr/local/etc/xray/config.json)}
+if [[ -f /usr/local/etc/xray/config.json ]]; then
+  REALITY_DEST=${REALITY_DEST:-$(jq -er '.inbounds[] | select(.tag == "personal") | .streamSettings.realitySettings | .target // .dest' /usr/local/etc/xray/config.json 2>/dev/null || true)}
 fi
-if [[ -s /etc/xray-sub/public_port && ${NONINTERACTIVE:-0} == 1 ]]; then
+if [[ -s /etc/xray-sub/public_port ]]; then
   SUB_PUBLIC_PORT=${SUB_PUBLIC_PORT:-$(tr -d '\r\n' </etc/xray-sub/public_port)}
 fi
-if [[ -s /etc/xray-sub/port && ${NONINTERACTIVE:-0} == 1 ]]; then
+if [[ -s /etc/xray-sub/port ]]; then
   SUB_LISTEN_PORT=${SUB_LISTEN_PORT:-$(tr -d '\r\n' </etc/xray-sub/port)}
 fi
 # Every interactive run shows all seven settings. Existing values are defaults,
@@ -69,8 +69,8 @@ ask REALITY_DEST 'REALITY 目标 host:port（默认值并不保证防封，安�
 # A custom target should not silently retain the Microsoft SNI.
 default_sni=${REALITY_DEST%:*}
 ask REALITY_SERVER_NAME 'REALITY serverName' "$default_sni"
-ask SUB_PUBLIC_PORT '订阅公网 TCP 端口' "${SUB_PUBLIC_PORT:-}"
-ask SUB_LISTEN_PORT '订阅内部 TCP 端口（无 NAT 时与公网相同）' "${SUB_LISTEN_PORT:-}"
+ask SUB_PUBLIC_PORT '订阅公网 TCP 端口（平台外部端口，可任意）' "${SUB_PUBLIC_PORT:-}"
+ask SUB_LISTEN_PORT '订阅内部 TCP 端口（须 ≥1024；无 NAT 时与公网相同）' "${SUB_LISTEN_PORT:-}"
 export SERVER_ADDRESS PUBLIC_PORT LISTEN_PORT REALITY_DEST REALITY_SERVER_NAME SUB_PUBLIC_PORT SUB_LISTEN_PORT
 printf '\n代理 公网 %s:%s -> 内部 TCP %s\n订阅 公网 %s:%s -> 内部 TCP %s\n目标 %s\n' \
   "$SERVER_ADDRESS" "$PUBLIC_PORT" "$LISTEN_PORT" "$SERVER_ADDRESS" "$SUB_PUBLIC_PORT" "$SUB_LISTEN_PORT" "$REALITY_DEST"

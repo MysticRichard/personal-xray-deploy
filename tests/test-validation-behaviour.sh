@@ -20,7 +20,10 @@ base=(SERVER_ADDRESS=203.0.113.10 LISTEN_PORT=18443 PUBLIC_PORT=28443 REALITY_DE
 case_run 'base parameters' accept "${base[@]}"
 case_run 'matching internal ports' reject "${base[@]}" SUB_LISTEN_PORT=18443
 case_run 'subscription port too large' reject "${base[@]}" SUB_LISTEN_PORT=70000
+case_run 'subscription listener below 1024' reject "${base[@]}" SUB_LISTEN_PORT=80
 case_run 'subscription public nonnumeric' reject "${base[@]}" SUB_PUBLIC_PORT=abc
 case_run 'mismatched SNI' reject "${base[@]}" REALITY_SERVER_NAME=other.example
 case_run 'zero listener' reject "${base[@]}" LISTEN_PORT=0
 case_run 'distinct subscription ports' accept "${base[@]}" SUB_LISTEN_PORT=18996 SUB_PUBLIC_PORT=28996
+case_run 'subscription listener at 1024' accept "${base[@]}" SUB_LISTEN_PORT=1024
+case_run 'subscription public low port via forwarding' accept "${base[@]}" SUB_LISTEN_PORT=18996 SUB_PUBLIC_PORT=80

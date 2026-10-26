@@ -11,7 +11,7 @@ sed -e "s#^STATE=.*#STATE=$w/client.json#" \
     -e "s#^USERINFO=.*#USERINFO=$w/userinfo#" \
     -e "s#^WEBROOT=.*#WEBROOT=$w/www#" /work/xray-sub > $w/sub.sh
 cat > $w/client.json <<'JSON'
-{"uuid":"11111111-1111-4111-8111-111111111111","private_key":"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA","public_key":"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA","short_id":"0123456789abcdef","server":"203.0.113.10","port":34439,"listen_port":2082,"server_name":"example.com"}
+{"uuid":"11111111-1111-4111-8111-111111111111","private_key":"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA","public_key":"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA","short_id":"0123456789abcdef","server":"203.0.113.10","port":28443,"listen_port":18444,"server_name":"example.com"}
 JSON
 tok=0123456789abcdef0123456789abcdef
 printf '%s\n' $tok > $w/token

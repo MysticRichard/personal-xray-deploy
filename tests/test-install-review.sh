@@ -73,7 +73,7 @@ run_validate() {
   fi
 }
 
-base=(SERVER_ADDRESS=203.0.113.10 LISTEN_PORT=18443 PUBLIC_PORT=34439
+base=(SERVER_ADDRESS=203.0.113.10 LISTEN_PORT=18443 PUBLIC_PORT=28443
   REALITY_DEST=example.com:443 REALITY_SERVER_NAME=example.com)
 run_validate accept "${base[@]}"
 run_validate accept "${base[@]}" SERVER_ADDRESS=vps.example.com
@@ -82,8 +82,32 @@ run_validate reject "${base[@]}" LISTEN_PORT=2096
 run_validate reject "${base[@]}" LISTEN_PORT=18443 SUB_LISTEN_PORT=18443
 run_validate reject "${base[@]}" PUBLIC_PORT=2096 SUB_PUBLIC_PORT=2096
 run_validate reject "${base[@]}" SUB_LISTEN_PORT=70000
+run_validate reject "${base[@]}" SUB_LISTEN_PORT=80
+run_validate accept "${base[@]}" SUB_LISTEN_PORT=1024
 run_validate reject "${base[@]}" SUB_PUBLIC_PORT=not-a-port
-pass 'subscription defaults and public/listen port collisions are rejected'
+pass 'subscription defaults, low-port guard and public/listen collisions are enforced'
+
+# The REALITY target resolver must reject every non-public address class before
+# any TLS probe, including IPv6 and IPv4-mapped IPv6 forms.
+target_fn=$(sed -n '/^reject_private_target_address()/,/^}/p' "$script")
+[[ -n $target_fn ]] || fail 'target address filter is missing'
+check_target() {
+  local name=$1 expected=$2 address=$3 rc=0
+  bash -c "set -Eeuo pipefail; $target_fn; reject_private_target_address '$address'" >/dev/null 2>&1 || rc=$?
+  if [[ $expected == private && $rc -ne 0 ]]; then fail "target filter accepted private address: $name"; fi
+  if [[ $expected == public && $rc -eq 0 ]]; then fail "target filter rejected public address: $name"; fi
+}
+check_target 'public IPv4' public 1.1.1.1
+check_target 'private IPv4' private 10.0.0.1
+check_target 'CGNAT IPv4' private 100.64.0.1
+check_target 'documentation IPv4' private 203.0.113.10
+check_target 'IPv6 loopback' private ::1
+check_target 'IPv6 ULA' private fd00::1
+check_target 'IPv6 link-local' private fe80::1
+check_target 'IPv6 documentation' private 2001:db8::1
+check_target 'mapped loopback' private ::ffff:127.0.0.1
+check_target 'public IPv6' public 2606:4700:4700::1111
+pass 'REALITY target filter rejects private, CGNAT, documentation and IPv6 local addresses'
 
 # Exercise the real renderer, including the secret-bearing inputs, without
 # contacting the network or mutating an installed service.
@@ -93,7 +117,7 @@ CLIENT_UUID=123e4567-e89b-12d3-a456-426614174000 \
 PRIVATE_KEY=AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA \
 PUBLIC_KEY=BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB \
 SHORT_ID=0123456789abcdef SERVER_ADDRESS=203.0.113.10 \
-LISTEN_PORT=18443 PUBLIC_PORT=34439 REALITY_DEST=example.com:443 \
+LISTEN_PORT=18443 PUBLIC_PORT=28443 REALITY_DEST=example.com:443 \
 REALITY_SERVER_NAME=example.com bash "$script" --render "$render_dir/config.json" \
   >"$render_dir/render.log" 2>&1 || { cat "$render_dir/render.log" >&2; fail 'renderer rejected valid payload'; }
 grep -q '"port": 18443' "$render_dir/config.json" || fail 'renderer did not write requested port'

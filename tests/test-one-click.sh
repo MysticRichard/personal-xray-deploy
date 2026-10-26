@@ -10,14 +10,16 @@ mkdir -p /isolated-one-click
 cp "$root/one-click.sh" /isolated-one-click/install.sh
 rm -f /root/xray-client/node.json
 export PATH=/test-shims:$PATH
-export SERVER_ADDRESS=203.0.113.10 PUBLIC_PORT=34439 LISTEN_PORT=18443
+export NONINTERACTIVE=1
+export SERVER_ADDRESS=203.0.113.10 PUBLIC_PORT=28443 LISTEN_PORT=18443
 export REALITY_DEST=example.com:443 REALITY_SERVER_NAME=example.com
+export SUB_PUBLIC_PORT=28996 SUB_LISTEN_PORT=18996
 before=$(sha256sum /usr/local/etc/xray/client.json)
 cd /isolated-one-click
 bash install.sh >/run/one-click.log 2>&1 || { cat /run/one-click.log; exit 1; }
 [[ $(sha256sum /usr/local/etc/xray/client.json) == "$before" ]]
 [[ -s /root/xray-client/node.json ]]
-jq -e '.proxies[0].port == 34439 and .proxies[0].type == "vless"' /root/xray-client/node.json >/dev/null
+jq -e '.proxies[0].port == 28443 and .proxies[0].type == "vless"' /root/xray-client/node.json >/dev/null
 systemctl is-active --quiet xray
 [[ $(stat -c %a /root/xray-client/node.json) == 600 ]]
 printf '0\n' | bash /usr/local/sbin/xray-admin >/run/admin-menu.log

@@ -15,7 +15,7 @@ sed -e "s#^STATE=.*#STATE=$work/client.json#" \
 chmod +x "$work/xray-sub"
 
 cat > "$work/client.json" <<'JSON'
-{"uuid":"11111111-1111-4111-8111-111111111111","private_key":"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA","public_key":"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA","short_id":"0123456789abcdef","server":"203.0.113.10","port":34439,"listen_port":2082,"server_name":"example.com"}
+{"uuid":"11111111-1111-4111-8111-111111111111","private_key":"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA","public_key":"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA","short_id":"0123456789abcdef","server":"203.0.113.10","port":28443,"listen_port":18444,"server_name":"example.com"}
 JSON
 printf '0123456789abcdef0123456789abcdef\n' > "$work/token"
 echo 2096 > "$work/port"
@@ -33,7 +33,7 @@ python3 - "$sub" <<'PY'
 import sys, yaml
 d = yaml.safe_load(open(sys.argv[1]))
 assert d['proxies'][0]['type'] == 'vless', 'node type'
-assert d['proxies'][0]['port'] == 34439, 'public port must be used'
+assert d['proxies'][0]['port'] == 28443, 'public port must be used'
 assert d['proxies'][0]['reality-opts']['short-id'] == '0123456789abcdef'
 assert d['proxy-groups'][0]['name'] == 'PROXY'
 assert d['rules'][-1] == 'MATCH,PROXY', 'final rule lost'

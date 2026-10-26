@@ -42,8 +42,22 @@ Clash 客户端可读取 `Subscription-Userinfo` 头。`xray-admin` 的额度设
 
 公共规则不包含你的设备域名、私有 IP 或 Tailscale 地址。客户端本地私有规则应放在公共规则和 `MATCH,PROXY` 之前，避免被兜底规则抢先命中。
 
+示例（只放在 FlClash 本地覆写/脚本，不要上传）：
+
+```yaml
+rules:
+  - DOMAIN,my-device.example.invalid,DIRECT
+  - IP-CIDR,192.0.2.10/32,DIRECT,no-resolve
+```
+
 规则不能全部放进 Xray：`PROCESS-NAME`、客户端 `GEOIP`、Clash `AND` 和 `SUB-RULE` 都依赖客户端。
 
 ## 订阅端口
 
 订阅和代理不能共用端口。代理 REALITY 使用一个端口，订阅 HTTP 使用另一个端口；两项公网/内部端口都在安装时填写。平台端口映射由用户自己配置。
+
+订阅内部端口必须 **≥1024**，因为 HTTP 服务以非 root 用户运行；订阅公网端口可以是 80/443 等低端口，由平台转发到内部端口即可。
+
+## 订阅传输
+
+当前订阅是 **HTTP**，随机令牌只控制访问，不加密传输。不要在公共场合粘贴带令牌的地址；如果网络环境不可信，应先加一层 HTTPS 反向代理或改用受控的传输方式。

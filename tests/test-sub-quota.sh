@@ -14,7 +14,7 @@ sed -e "s#^STATE=.*#STATE=$work/client.json#" \
     "$root/xray-sub" > "$work/xray-sub"
 
 cat > "$work/client.json" <<'JSON'
-{"uuid":"11111111-1111-4111-8111-111111111111","private_key":"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA","public_key":"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA","short_id":"0123456789abcdef","server":"203.0.113.10","port":34439,"listen_port":2082,"server_name":"example.com"}
+{"uuid":"11111111-1111-4111-8111-111111111111","private_key":"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA","public_key":"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA","short_id":"0123456789abcdef","server":"203.0.113.10","port":28443,"listen_port":18444,"server_name":"example.com"}
 JSON
 tok=fe0123456789abcdef0123456789abcd
 printf '%s\n' "$tok" > "$work/token"

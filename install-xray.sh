@@ -22,6 +22,10 @@ validate() {
   SUB_PUBLIC_PORT=${SUB_PUBLIC_PORT:-$SUB_LISTEN_PORT}
   valid_port "$LISTEN_PORT" && valid_port "$PUBLIC_PORT" || fail 'Invalid public/listen port.'
   valid_port "$SUB_LISTEN_PORT" || fail 'Invalid subscription listen port.'
+  # The HTTP service runs as a dedicated non-root user and has no bind
+  # capability. A public port below 1024 is still fine when the platform
+  # forwards it, but the internal listener must be unprivileged.
+  ((10#$SUB_LISTEN_PORT >= 1024)) || fail 'Subscription listen port must be >= 1024; the HTTP service runs as a non-root user. Use a platform port-forward for 80/443.'
   valid_port "$SUB_PUBLIC_PORT" || fail 'Invalid subscription public port.'
   [[ $SUB_LISTEN_PORT != "$LISTEN_PORT" ]] || fail 'Subscription port must differ from the proxy port.'
   [[ $SUB_PUBLIC_PORT != "$PUBLIC_PORT" ]] || fail 'Subscription public port must differ from the proxy public port.'
@@ -59,6 +63,23 @@ port_is_free_or_owned() {
   if ss -lntHp "sport = :$port" 2>/dev/null | grep -q .; then
     service_owns_port "$port" "$unit" || fail "TCP port $port is occupied by another process."
   fi
+}
+# A REALITY target is contacted by this server. Reject addresses that are not
+# usable public destinations so a typo cannot turn the target into an internal
+# service probe.
+reject_private_target_address() {
+  local address=${1,,}
+  [[ -n $address ]] || return 1
+  case "$address" in
+    ::ffff:*) address=${address#::ffff:} ;;
+  esac
+  case "$address" in
+    10.*|127.*|0.*|169.254.*|192.168.*|172.1[6-9].*|172.2[0-9].*|172.3[01].*|100.6[4-9].*|100.[7-9][0-9].*|100.1[01][0-9].*|100.11[0-9].*|100.12[0-7].*|198.1[89].*|192.0.0.*|192.0.2.*|198.51.100.*|203.0.113.*|22[4-9].*|2[4-5][0-9].*)
+      return 0;;
+    ::1|::|fc*|fd*|fe8*|fe9*|fea*|feb*|ff*|2001:db8:*)
+      return 0;;
+  esac
+  return 1
 }
 
 validate_secrets() {
@@ -129,12 +150,17 @@ preflight() {
     [[ $old_port == "$LISTEN_PORT" ]] || fail 'Requested port is occupied; use the existing instance port or an unused port.'
   fi
   port_is_free_or_owned "$SUB_LISTEN_PORT" xray-sub
-  local address
+  local addresses address found=0
+  if ! addresses=$(timeout 10 getent ahosts "$DEST_HOST" 2>/dev/null | awk '{print $1}' | sort -u); then
+    fail 'REALITY target DNS resolution failed or timed out.'
+  fi
+  [[ -n $addresses ]] || fail 'REALITY target did not resolve to any address.'
   while read -r address; do
-    case "$address" in
-      10.*|127.*|0.*|169.254.*|192.168.*|172.1[6-9].*|172.2[0-9].*|172.3[01].*) fail 'REALITY target resolved to a local/private IPv4 address.';;
-    esac
-  done < <(getent ahostsv4 "$DEST_HOST" | awk '{print $1}' | sort -u)
+    [[ -n $address ]] || continue
+    found=1
+    reject_private_target_address "$address" && fail "REALITY target resolved to a non-public address: $address"
+  done <<< "$addresses"
+  ((found)) || fail 'REALITY target did not resolve to any address.'
   local probe
   probe=$(timeout 15 openssl s_client -connect "$REALITY_DEST" -servername "$REALITY_SERVER_NAME" -verify_hostname "$REALITY_SERVER_NAME" -verify_return_error -tls1_3 -alpn h2 </dev/null 2>&1) || fail 'Target TLS/certificate check failed.'
   [[ $probe == *TLSv1.3* && $probe == *'ALPN protocol: h2'* ]] || fail 'Target did not negotiate TLS1.3 and h2.'
@@ -150,7 +176,8 @@ preflight() {
   echo 'PASS: preflight. Public NAT mapping and client reachability still need external verification.'
 }
 
-# Build the subscription service: editable rules + static HTTP on localhost.
+# Build the subscription service: public rules + static HTTP on the instance
+# interface (the platform forwards the public port here).
 # The public port is separate from the guest listen port, so the caller may
 # expose it through its own port-forward table.
 setup_subscription() {
@@ -353,8 +380,10 @@ install_node() {  preflight
   snapshot subweb /srv/sub
   snapshot subunit /etc/systemd/system/xray-sub.service
   snapshot subbin /usr/local/sbin/xray-sub
+  echo 'STEP: download release' >&2
   curl --fail --location --retry 2 --max-time 180 "https://github.com/XTLS/Xray-core/releases/download/$VERSION/Xray-linux-64.zip" -o "$stage/core.zip"
   printf '%s  %s\n' "$ARCHIVE_SHA256" "$stage/core.zip" | sha256sum --check --status || fail 'Release checksum mismatch.'
+  echo 'STEP: extract release' >&2
   # Decompress only what is needed, and drop the archive immediately: on a
   # 128 MB cgroup these few tens of MB of page cache matter for the first start.
   unzip -q -j "$stage/core.zip" xray geoip.dat -d "$stage/core"
@@ -376,6 +405,7 @@ install_node() {  preflight
     PRIVATE_KEY=$(printf '%s\n' "$keys" | awk -F': *' '/^(PrivateKey|Private key):/ {print $2; exit}')
     PUBLIC_KEY=$(printf '%s\n' "$keys" | awk -F': *' '/^(Password \(PublicKey\)|Password|PublicKey|Public key):/ {print $2; exit}')
   fi
+  echo 'STEP: render and validate config' >&2
   render "$stage/config.json"
   XRAY_LOCATION_ASSET="$stage/core" "$stage/core/xray" run -test -config "$stage/config.json"
   jq -n --arg uuid "$CLIENT_UUID" --arg private_key "$PRIVATE_KEY" --arg public_key "$PUBLIC_KEY" --arg short_id "$SHORT_ID" --arg server "$SERVER_ADDRESS" --argjson port "$PUBLIC_PORT" --argjson listen_port "$LISTEN_PORT" --arg server_name "$REALITY_SERVER_NAME" '{uuid:$uuid, private_key:$private_key, public_key:$public_key, short_id:$short_id, server:$server, port:$port, listen_port:$listen_port, server_name:$server_name}' > "$stage/client.json"
@@ -419,6 +449,7 @@ LogRateLimitBurst=20
 WantedBy=multi-user.target
 EOF
   changed=1
+  echo 'STEP: install files' >&2
   install -m 755 "$stage/core/xray" "$BIN.new"
   mv -f "$BIN.new" "$BIN"
   install -m 644 "$stage/core/geoip.dat" "$ASSETS/geoip.dat"
@@ -432,9 +463,11 @@ EOF
   rm -rf "$stage"
   sync
   # Build and validate every subscription payload before touching either service.
+  echo 'STEP: prepare subscription' >&2
   setup_subscription 0
   systemctl daemon-reload
   systemctl enable xray
+  echo 'STEP: activate services' >&2
   local attempt
   for attempt in 1 2 3; do
     systemctl restart xray || true
