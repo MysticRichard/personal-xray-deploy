@@ -48,21 +48,22 @@ xray-admin
 
 ## 规则怎么改
 
-规则在服务器上，是一个可编辑的 YAML：
+两条规则文件：
 
-```text
-/etc/xray-sub/rules.yaml
-```
+| 文件 | 用途 |
+|---|---|
+| `/etc/xray-sub/rules.yaml` | 通用规则，随仓库公开 |
+| `/etc/xray-sub/rules.local.yaml` | 你的私有规则，不进仓库 |
 
-每行一条，`- ` 开头，`#` 是注释。改完执行：
+私有规则排在通用规则之前，优先匹配。
 
 ```bash
-xray-sub
+xray-admin
+# 5 编辑通用规则
+# 6 编辑私有规则
 ```
 
-FlClash 下拉刷新订阅即可，不用重启服务。
-
-`xray-sub` 会校验格式，格式不对时拒绝生成，不会破坏已有订阅。
+改完自动重新生成，FlClash 下拉刷新即可。格式不对会拒绝生成，不会破坏已有订阅。
 
 详见 [docs/subscription.md](docs/subscription.md)。
 
