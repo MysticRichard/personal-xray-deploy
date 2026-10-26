@@ -177,7 +177,7 @@ After=network.target
 
 [Service]
 Type=simple
-ExecStart=${busybox_bin} httpd -f -p 127.0.0.1:${sub_port} -h /srv/sub
+ExecStart=${busybox_bin} httpd -f -p 0.0.0.0:${sub_port} -h /srv/sub
 Restart=always
 RestartSec=5
 User=xray-sub
