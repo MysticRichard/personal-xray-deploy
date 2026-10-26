@@ -23,6 +23,13 @@ if [[ -f /usr/local/etc/xray/client.json ]] && command -v jq >/dev/null; then
   PUBLIC_PORT=${PUBLIC_PORT:-$(jq -er .port /usr/local/etc/xray/client.json)}
   LISTEN_PORT=${LISTEN_PORT:-$(jq -er .listen_port /usr/local/etc/xray/client.json)}
 fi
+# Subscription endpoint saved by a previous run, if any.
+if [[ -f /etc/xray-sub/public_port ]]; then
+  SUB_PUBLIC_PORT=${SUB_PUBLIC_PORT:-$(tr -d '\r\n' </etc/xray-sub/public_port)}
+fi
+if [[ -f /etc/xray-sub/port ]]; then
+  SUB_LISTEN_PORT=${SUB_LISTEN_PORT:-$(tr -d '\r\n' </etc/xray-sub/port)}
+fi
 if [[ -z ${SERVER_ADDRESS:-} || $SERVER_ADDRESS == REPLACE_* ]]; then
   read -r -p '输入平台显示的 VPS 公网 IP 或域名: ' SERVER_ADDRESS
 fi
@@ -43,12 +50,15 @@ fi
 # Subscription needs its own port: it cannot share the REALITY listener without
 # breaking the camouflage fallback.
 if [[ -z ${SUB_PUBLIC_PORT:-} ]]; then
-  read -r -p '订阅公网端口（平台转发到实例 2096 的那个）: ' SUB_PUBLIC_PORT
+  read -r -p '订阅公网端口（平台转发规则的外部端口）: ' SUB_PUBLIC_PORT
 fi
-export SERVER_ADDRESS PUBLIC_PORT LISTEN_PORT REALITY_DEST REALITY_SERVER_NAME SUB_PUBLIC_PORT
-printf '\n个人 Xray 一键安装\n代理  公网 %s:%s -> 内部 TCP %s\n订阅  公网 %s:%s -> 内部 TCP 2096\n目标  %s\n' \
+if [[ -z ${SUB_LISTEN_PORT:-} ]]; then
+  read -r -p '订阅内部端口（对应转发规则的内部端口，无 NAT 时与公网端口相同）: ' SUB_LISTEN_PORT
+fi
+export SERVER_ADDRESS PUBLIC_PORT LISTEN_PORT REALITY_DEST REALITY_SERVER_NAME SUB_PUBLIC_PORT SUB_LISTEN_PORT
+printf '\n个人 Xray 一键安装\n代理  公网 %s:%s -> 内部 TCP %s\n订阅  公网 %s:%s -> 内部 TCP %s\n目标  %s\n' \
   "$SERVER_ADDRESS" "$PUBLIC_PORT" "$LISTEN_PORT" \
-  "$SERVER_ADDRESS" "$SUB_PUBLIC_PORT" "$REALITY_DEST"
+  "$SERVER_ADDRESS" "$SUB_PUBLIC_PORT" "$SUB_LISTEN_PORT" "$REALITY_DEST"
 echo '依次执行：依赖检查、目标检测、下载校验、配置检查、服务启动、订阅生成。'
 echo '不修改端口映射、系统源、宿主内核或防火墙。'
 missing=0

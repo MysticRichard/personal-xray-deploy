@@ -70,7 +70,7 @@ preflight() {
   for tool in curl openssl ss getent unzip jq sha256sum timeout free systemctl systemd-detect-virt; do command -v "$tool" >/dev/null || fail "Missing $tool; install dependencies listed in README."; done
   validate
   printf 'Public endpoint: %s:%s -> guest TCP port %s\n' "$SERVER_ADDRESS" "$PUBLIC_PORT" "$LISTEN_PORT"
-  printf 'Subscription: public %s -> guest TCP port %s\n' "${SUB_PUBLIC_PORT:-2096}" "${SUB_LISTEN_PORT:-2096}"
+  printf 'Subscription: public %s -> guest TCP port %s\n' "${SUB_PUBLIC_PORT:-$LISTEN_PORT}" "${SUB_LISTEN_PORT:-2096}"
   printf 'Virtualization: '; systemd-detect-virt || true
   free -m
   df -h /
