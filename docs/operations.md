@@ -10,7 +10,7 @@
 bash <(curl -fsSL https://raw.githubusercontent.com/MysticRichard/personal-xray-deploy/main/one-click.sh)
 ```
 
-交互会依次询问七项：
+交互会依次询问十项：
 
 1. 公网 IP 或域名
 2. 代理公网 TCP 端口
@@ -19,6 +19,9 @@ bash <(curl -fsSL https://raw.githubusercontent.com/MysticRichard/personal-xray-
 5. REALITY serverName（默认跟随目标）
 6. 订阅公网 TCP 端口
 7. 订阅内部 TCP 端口（须 ≥1024）
+8. 月流量（`100GB` / `1TB` / `0`=不限，按 1024 进制）
+9. 流量重置日（`1`～`31`，`0`=无固定重置日）
+10. 套餐到期日（`YYYY-MM-DD`，`0`=长期有效）
 
 明确无人值守时可以用环境变量：
 
@@ -31,10 +34,22 @@ REALITY_DEST=www.apple.com:443 \
 REALITY_SERVER_NAME=www.apple.com \
 SUB_PUBLIC_PORT=<订阅公网端口> \
 SUB_LISTEN_PORT=<订阅内部端口≥1024> \
+PLAN_TOTAL=100GB \
+PLAN_RESET_DAY=1 \
+PLAN_EXPIRE=2027-10-26 \
 bash <(curl -fsSL https://raw.githubusercontent.com/MysticRichard/personal-xray-deploy/main/one-click.sh)
 ```
 
 重装会保留已有 UUID、密钥和订阅 token，但仍应先备份。已有 `/etc/xray-sub/rules.yaml` 默认不会被覆盖；不会自动把线上规则换成 8,633 条模板。
+
+## 套餐信息
+
+```bash
+xray-admin --plan
+# 或菜单 13
+```
+
+显示月流量、重置日和到期日。月流量/到期日首次安装会写入订阅额度头；`upload=0; download=0` 是占位，不是真实已用量。重置日没有标准客户端字段，只在 `xray-admin --plan` 展示。
 
 ## 查询订阅地址
 

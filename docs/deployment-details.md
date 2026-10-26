@@ -7,7 +7,7 @@
 `one-click.sh` 会按顺序执行：
 
 1. 检查 root 权限、Debian、systemd、amd64。
-2. 收集七项参数：公网地址、代理公网/内部端口、REALITY 目标、serverName、订阅公网/内部端口。重复安装时已保存值作为默认值显示，但仍逐项询问。
+2. 收集十项参数：公网地址、代理公网/内部端口、REALITY 目标、serverName、订阅公网/内部端口、月流量、流量重置日、套餐到期日。重复安装时已保存值作为默认值显示，但仍逐项询问。
 3. 安装缺失的工具依赖（`ca-certificates curl openssl unzip jq iproute2 procps busybox nano`）。
 4. 校验目标站：解析结果必须是公网地址（拒绝私网、回环、链路本地、CGNAT、文档/基准测试网段和 IPv6 本地地址）；证书有效、TLS 1.3、ALPN h2 必须通过。HTTP 状态只作参考，不作为安装门槛。
 5. 下载固定版本 Xray，校验 SHA256。
@@ -46,6 +46,24 @@
 
 Xray v26.7.11 起，REALITY 服务端默认 `minClientVer=26.3.27`，而 mihomo/FlClash 上报的客户端版本是 `1.8.2`，会显示 `REALITY authentication failed`；当前 v26.6.27 没有这个默认限制。升级 Xray 前必须先用 FlClash 实测，不要只跑 `xray -test`。
 
+## 套餐信息怎么填
+
+一键部署会问三项：
+
+| 项目 | 示例 | 规则 |
+|---|---|---|
+| 月流量 | `100GB`、`1TB`、`0` | `0` 表示不限；按 1024 进制换算成字节 |
+| 流量重置日 | `1`、`15`、`0` | `1`～`31` 表示每月几号；`0` 表示无固定重置日 |
+| 套餐到期日 | `2027-10-26`、`0` | `YYYY-MM-DD`；`0` 表示长期有效 |
+
+写入位置：
+
+- `/etc/xray-sub/provider-plan`：私有套餐元数据（root 600），`xray-admin --plan` 可查看。
+- `/etc/xray-sub/userinfo`：客户端显示的 `total`/`expire`；首次安装写入 `upload=0; download=0` 作为占位，不是真实已用量，之后用 `xray-admin` 菜单 9 更新。
+- 重置日没有标准 `Subscription-Userinfo` 字段，客户端不会自动显示；只在 `xray-admin --plan` 和私有记录中展示。
+
+供应商真实流量/重置日以供应商后台为准；脚本不自动同步，也不会按月归零。
+
 ## 密钥与重复安装
 
 - 首次安装生成 UUID、X25519 密钥对和 shortId。
@@ -60,7 +78,7 @@ Xray v26.7.11 起，REALITY 服务端默认 `minClientVer=26.3.27`，而 mihomo/
 
 ## 验收清单
 
-1. `systemctl status xray` 和 `systemctl status xray-sub` 均为 active。
+1. `systemctl status xray` 和 `systemctl status xray-sub` 均为 active；`xray-admin --plan` 能显示月流量/重置日/到期日。
 2. `ss -lntp` 能看到代理内部端口和订阅内部端口在监听。
 3. `xray-admin --sub` 输出的订阅地址能在本机或另一台设备打开，返回 YAML。
 4. 用手机流量或另一台电脑导入订阅，访问测试地址，确认出口 IP 是这台 VPS。
@@ -75,6 +93,6 @@ Xray v26.7.11 起，REALITY 服务端默认 `minClientVer=26.3.27`，而 mihomo/
 - 128 MB 内存是低配下限，长期高并发需要观察；`GOMEMLIMIT` 是缓解措施，不是已证明的故障根因修复。
 - 配置能降低被动识别概率，但不能保证 IP 不被封。
 - 订阅是 HTTP，令牌只控制访问，不加密传输。
-- 流量额度是手动快照，不自动统计、限流或按月重置。
+- 流量额度是手动快照，不自动统计、限流或按月重置；重置日不是 Clash 标准字段，只在 `xray-admin --plan` 中展示。
 - 私有设备规则只在客户端，VPS 不保存、不合并、不导出。
 - 日志写入 journald，已设速率限制，但仍需定期检查磁盘。

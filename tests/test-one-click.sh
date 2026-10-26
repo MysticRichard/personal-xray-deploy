@@ -14,6 +14,7 @@ export NONINTERACTIVE=1
 export SERVER_ADDRESS=203.0.113.10 PUBLIC_PORT=28443 LISTEN_PORT=18443
 export REALITY_DEST=example.com:443 REALITY_SERVER_NAME=example.com
 export SUB_PUBLIC_PORT=28996 SUB_LISTEN_PORT=18996
+export PLAN_TOTAL=100GB PLAN_RESET_DAY=1 PLAN_EXPIRE=2027-10-26
 before=$(sha256sum /usr/local/etc/xray/client.json)
 cd /isolated-one-click
 bash install.sh >/run/one-click.log 2>&1 || { cat /run/one-click.log; exit 1; }

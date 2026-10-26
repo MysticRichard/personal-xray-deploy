@@ -20,18 +20,30 @@ VPS 不变时，新电脑只需把 `xray-admin --sub` 输出的地址粘到 FlCl
 
 VPS 换掉后，订阅地址和节点凭据会变。新服务器安装完成后，用新地址导入 FlClash；把你电脑上私有覆写文件中的规则复制到新电脑的 FlClash 本地 override/script 中。私有规则不存 VPS、不进订阅、不进仓库。
 
-## 流量额度
+## 流量额度与套餐
 
-Clash 客户端可读取 `Subscription-Userinfo` 头。`xray-admin` 的额度设置仅是手动显示快照，不是供应商真实统计、不是限流，也没有自动月度重置：
+一键部署会询问：
 
 ```text
-已上传字节数
-已下载字节数
-总流量字节数（0=不限）
-到期时间（仅到期，不是重置日）
+月流量：100GB / 1TB / 0=不限（按 1024 进制）
+流量重置日：1-31，0=无固定重置日
+套餐到期日：YYYY-MM-DD，0=长期有效
 ```
 
-供应商真实套餐、月度流量和重置日请以供应商后台为准。脚本无法自动读取它们。
+这些值写入 `/etc/xray-sub/provider-plan`（root 600）；`xray-admin --plan` 或菜单 13 可查看。月流量和到期日会作为 `Subscription-Userinfo` 的 `total`/`expire` 首次写入 `/etc/xray-sub/userinfo`，其中 `upload=0; download=0` 只是占位，不是真实已用量。
+
+`Subscription-Userinfo` 标准字段只有：
+
+```text
+upload
+download
+total
+expire
+```
+
+**没有重置日字段**，客户端不会显示“每月几号重置”。重置日只作为私有元数据展示。
+
+`xray-admin` 的额度设置是手动快照，不是供应商真实统计、不是限流，也没有自动月度重置。供应商真实套餐、月度流量和重置日请以供应商后台为准；脚本无法自动读取它们。
 
 ## 规则归属
 

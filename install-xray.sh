@@ -37,6 +37,41 @@ validate() {
   [[ ${REALITY_SERVER_NAME:-} =~ ^[A-Za-z0-9][A-Za-z0-9.-]*$ ]] || fail 'Set REALITY_SERVER_NAME.'
   [[ ${DEST_HOST,,} == "${REALITY_SERVER_NAME,,}" ]] || fail 'Use the same target hostname and serverName for this single-node template.'
 }
+validate_plan() {
+  local v num mult parsed
+  PLAN_TOTAL=${PLAN_TOTAL:-0}
+  v=${PLAN_TOTAL^^}
+  PLAN_RESET_DAY=${PLAN_RESET_DAY:-0}
+  PLAN_EXPIRE=${PLAN_EXPIRE:-0}
+  PLAN_TOTAL_BYTES=0
+  PLAN_EXPIRE_EPOCH=0
+  PLAN_EXPIRE_DATE=0
+  if [[ $v != 0 ]]; then
+    if [[ $v =~ ^([0-9]+)(\.[0-9]+)?(B|KB|MB|GB|TB)$ ]]; then
+      num="${BASH_REMATCH[1]}${BASH_REMATCH[2]}"
+      case ${BASH_REMATCH[3]} in
+        B) mult=1;;
+        KB) mult=1024;;
+        MB) mult=1048576;;
+        GB) mult=1073741824;;
+        TB) mult=1099511627776;;
+        *) fail 'Invalid PLAN_TOTAL unit.';;
+      esac
+      PLAN_TOTAL_BYTES=$(awk -v n="$num" -v m="$mult" 'BEGIN { printf "%.0f", n*m }')
+    else
+      fail 'PLAN_TOTAL must be 0 (unlimited) or a size like 100GB/1TB.'
+    fi
+  fi
+  [[ $PLAN_RESET_DAY =~ ^[0-9]{1,2}$ ]] || fail 'PLAN_RESET_DAY must be 0-31 (0 means no fixed reset day).'
+  ((10#$PLAN_RESET_DAY <= 31)) || fail 'PLAN_RESET_DAY must be 0-31.'
+  if [[ $PLAN_EXPIRE != 0 ]]; then
+    [[ $PLAN_EXPIRE =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}$ ]] || fail 'PLAN_EXPIRE must be YYYY-MM-DD or 0.'
+    parsed=$(date -u -d "$PLAN_EXPIRE" +%F 2>/dev/null) || fail 'PLAN_EXPIRE is not a valid date.'
+    [[ $parsed == "$PLAN_EXPIRE" ]] || fail 'PLAN_EXPIRE is not a valid date.'
+    PLAN_EXPIRE_EPOCH=$(date -u -d "$PLAN_EXPIRE 23:59:59" +%s) || fail 'PLAN_EXPIRE conversion failed.'
+    PLAN_EXPIRE_DATE=$PLAN_EXPIRE
+  fi
+}
 service_owns_port() {
   local port="$1" unit="$2" main_pid pid expected_exe
   main_pid=$(systemctl show -p MainPID --value "$unit" 2>/dev/null || true)
@@ -132,6 +167,8 @@ preflight() {
   [[ $(uname -m) == x86_64 ]] || fail 'This reviewed release checksum is for amd64 only.'
   for tool in curl openssl ss getent unzip jq sha256sum timeout free systemctl systemd-detect-virt; do command -v "$tool" >/dev/null || fail "Missing $tool; install dependencies listed in README."; done
   validate
+  validate_plan
+  printf 'Plan: total=%s bytes, reset day=%s, expire=%s\n' "$PLAN_TOTAL_BYTES" "$PLAN_RESET_DAY" "${PLAN_EXPIRE_DATE:-0}"
   printf 'Public endpoint: %s:%s -> guest TCP port %s\n' "$SERVER_ADDRESS" "$PUBLIC_PORT" "$LISTEN_PORT"
   printf 'Subscription: public %s -> guest TCP port %s\n' "${SUB_PUBLIC_PORT:-$LISTEN_PORT}" "${SUB_LISTEN_PORT:-2096}"
   printf 'Virtualization: '; systemd-detect-virt || true
@@ -180,6 +217,7 @@ preflight() {
 # expose it through its own port-forward table.
 setup_subscription() {
   local activate=${1:-1} sub_port token unit_tmp
+  validate_plan
   sub_port=${SUB_LISTEN_PORT:-2096}
   port_is_free_or_owned "$sub_port" xray-sub
   install -d -m 750 /etc/xray-sub
@@ -204,6 +242,16 @@ setup_subscription() {
   fi
 
   printf '%s\n' "$sub_port" > /etc/xray-sub/port
+  {
+    printf 'total_display=%s\n' "$PLAN_TOTAL"
+    printf 'total_bytes=%s\n' "$PLAN_TOTAL_BYTES"
+    printf 'reset_day=%s\n' "$PLAN_RESET_DAY"
+    printf 'expire_date=%s\n' "$PLAN_EXPIRE_DATE"
+    printf 'expire_epoch=%s\n' "$PLAN_EXPIRE_EPOCH"
+  } > /etc/xray-sub/provider-plan
+  chown root:root /etc/xray-sub/provider-plan
+  chmod 600 /etc/xray-sub/provider-plan
+
   install -m 755 "$SELF_DIR/xray-sub" /usr/local/sbin/xray-sub
 
   # busybox may not be installed (minimal images), and the service user must be
@@ -220,6 +268,14 @@ setup_subscription() {
       --shell /usr/sbin/nologin xray-sub || fail '无法创建 xray-sub 用户'
   fi
   [[ $(id -u xray-sub) -ne 0 && $(id -g xray-sub) -ne 0 ]] || fail 'xray-sub 用户或组不能是 root'
+
+  # Seed the client-visible quota only on first install, after xray-sub exists.
+  # Existing userinfo is preserved so a reinstall cannot erase actual usage.
+  if [[ ! -f /etc/xray-sub/userinfo ]] && (( PLAN_TOTAL_BYTES > 0 || PLAN_EXPIRE_EPOCH > 0 )); then
+    printf 'upload=0; download=0; total=%s; expire=%s\n' "$PLAN_TOTAL_BYTES" "$PLAN_EXPIRE_EPOCH" > /etc/xray-sub/userinfo
+    chown root:xray-sub /etc/xray-sub/userinfo
+    chmod 640 /etc/xray-sub/userinfo
+  fi
   chown root:xray-sub /etc/xray-sub/userinfo 2>/dev/null || true
   chmod 640 /etc/xray-sub/userinfo 2>/dev/null || true
 

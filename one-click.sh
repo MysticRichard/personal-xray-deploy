@@ -3,7 +3,7 @@
 set -Eeuo pipefail
 set +x
 umask 077
-SCRIPT_VERSION=2026.10.26-review4
+SCRIPT_VERSION=2026.10.26-review5
 printf '个人 Xray 安装脚本 %s\n' "$SCRIPT_VERSION"
 [[ $EUID -eq 0 ]] || { echo '请使用 root 运行'; exit 1; }
 [[ -f /etc/debian_version && -d /run/systemd/system ]] || { echo '需要 Debian + systemd'; exit 1; }
@@ -39,7 +39,13 @@ fi
 if [[ -s /etc/xray-sub/port ]]; then
   SUB_LISTEN_PORT=${SUB_LISTEN_PORT:-$(tr -d '\r\n' </etc/xray-sub/port)}
 fi
-# Every interactive run shows all seven settings. Existing values are defaults,
+plan_file=/etc/xray-sub/provider-plan
+if [[ -f $plan_file ]]; then
+  PLAN_TOTAL=${PLAN_TOTAL:-$(sed -n 's/^total_display=//p' "$plan_file")}
+  PLAN_RESET_DAY=${PLAN_RESET_DAY:-$(sed -n 's/^reset_day=//p' "$plan_file")}
+  PLAN_EXPIRE=${PLAN_EXPIRE:-$(sed -n 's/^expire_date=//p' "$plan_file")}
+fi
+# Every interactive run shows all ten settings. Existing values are defaults,
 # never silently skipped. NONINTERACTIVE=1 is for explicit unattended deployment.
 ask() {
   local name=$1 label=$2 default=${3:-} answer
@@ -63,9 +69,14 @@ default_sni=${REALITY_DEST%:*}
 ask REALITY_SERVER_NAME 'REALITY serverName' "$default_sni"
 ask SUB_PUBLIC_PORT '订阅公网 TCP 端口（平台外部端口，可任意）' "${SUB_PUBLIC_PORT:-}"
 ask SUB_LISTEN_PORT '订阅内部 TCP 端口（须 ≥1024；无 NAT 时与公网相同）' "${SUB_LISTEN_PORT:-}"
+ask PLAN_TOTAL '月流量（示例 100GB / 1TB / 0=不限，1024 进制）' "${PLAN_TOTAL:-0}"
+ask PLAN_RESET_DAY '流量重置日（1-31，0=无固定重置日）' "${PLAN_RESET_DAY:-0}"
+ask PLAN_EXPIRE '套餐到期日（YYYY-MM-DD，0=长期有效）' "${PLAN_EXPIRE:-0}"
 export SERVER_ADDRESS PUBLIC_PORT LISTEN_PORT REALITY_DEST REALITY_SERVER_NAME SUB_PUBLIC_PORT SUB_LISTEN_PORT
+export PLAN_TOTAL PLAN_RESET_DAY PLAN_EXPIRE
 printf '\n代理 公网 %s:%s -> 内部 TCP %s\n订阅 公网 %s:%s -> 内部 TCP %s\n目标 %s\n' \
   "$SERVER_ADDRESS" "$PUBLIC_PORT" "$LISTEN_PORT" "$SERVER_ADDRESS" "$SUB_PUBLIC_PORT" "$SUB_LISTEN_PORT" "$REALITY_DEST"
+printf '套餐 月流量 %s / 重置日 %s / 到期 %s\n' "$PLAN_TOTAL" "$PLAN_RESET_DAY" "$PLAN_EXPIRE"
 echo '私有设备规则请留在 FlClash 本地覆写，不会上传到仓库。'
 echo '订阅目前使用 HTTP：随机路径只控制访问，不加密传输。'
 echo '套餐流量/重置日不会自动从供应商同步；未统计时不显示虚构已用量。'
@@ -111,6 +122,41 @@ validate() {
   valid_port "$DEST_PORT" || fail 'Invalid target port.'
   [[ ${REALITY_SERVER_NAME:-} =~ ^[A-Za-z0-9][A-Za-z0-9.-]*$ ]] || fail 'Set REALITY_SERVER_NAME.'
   [[ ${DEST_HOST,,} == "${REALITY_SERVER_NAME,,}" ]] || fail 'Use the same target hostname and serverName for this single-node template.'
+}
+validate_plan() {
+  local v num mult parsed
+  PLAN_TOTAL=${PLAN_TOTAL:-0}
+  v=${PLAN_TOTAL^^}
+  PLAN_RESET_DAY=${PLAN_RESET_DAY:-0}
+  PLAN_EXPIRE=${PLAN_EXPIRE:-0}
+  PLAN_TOTAL_BYTES=0
+  PLAN_EXPIRE_EPOCH=0
+  PLAN_EXPIRE_DATE=0
+  if [[ $v != 0 ]]; then
+    if [[ $v =~ ^([0-9]+)(\.[0-9]+)?(B|KB|MB|GB|TB)$ ]]; then
+      num="${BASH_REMATCH[1]}${BASH_REMATCH[2]}"
+      case ${BASH_REMATCH[3]} in
+        B) mult=1;;
+        KB) mult=1024;;
+        MB) mult=1048576;;
+        GB) mult=1073741824;;
+        TB) mult=1099511627776;;
+        *) fail 'Invalid PLAN_TOTAL unit.';;
+      esac
+      PLAN_TOTAL_BYTES=$(awk -v n="$num" -v m="$mult" 'BEGIN { printf "%.0f", n*m }')
+    else
+      fail 'PLAN_TOTAL must be 0 (unlimited) or a size like 100GB/1TB.'
+    fi
+  fi
+  [[ $PLAN_RESET_DAY =~ ^[0-9]{1,2}$ ]] || fail 'PLAN_RESET_DAY must be 0-31 (0 means no fixed reset day).'
+  ((10#$PLAN_RESET_DAY <= 31)) || fail 'PLAN_RESET_DAY must be 0-31.'
+  if [[ $PLAN_EXPIRE != 0 ]]; then
+    [[ $PLAN_EXPIRE =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}$ ]] || fail 'PLAN_EXPIRE must be YYYY-MM-DD or 0.'
+    parsed=$(date -u -d "$PLAN_EXPIRE" +%F 2>/dev/null) || fail 'PLAN_EXPIRE is not a valid date.'
+    [[ $parsed == "$PLAN_EXPIRE" ]] || fail 'PLAN_EXPIRE is not a valid date.'
+    PLAN_EXPIRE_EPOCH=$(date -u -d "$PLAN_EXPIRE 23:59:59" +%s) || fail 'PLAN_EXPIRE conversion failed.'
+    PLAN_EXPIRE_DATE=$PLAN_EXPIRE
+  fi
 }
 service_owns_port() {
   local port="$1" unit="$2" main_pid pid expected_exe
@@ -207,6 +253,8 @@ preflight() {
   [[ $(uname -m) == x86_64 ]] || fail 'This reviewed release checksum is for amd64 only.'
   for tool in curl openssl ss getent unzip jq sha256sum timeout free systemctl systemd-detect-virt; do command -v "$tool" >/dev/null || fail "Missing $tool; install dependencies listed in README."; done
   validate
+  validate_plan
+  printf 'Plan: total=%s bytes, reset day=%s, expire=%s\n' "$PLAN_TOTAL_BYTES" "$PLAN_RESET_DAY" "${PLAN_EXPIRE_DATE:-0}"
   printf 'Public endpoint: %s:%s -> guest TCP port %s\n' "$SERVER_ADDRESS" "$PUBLIC_PORT" "$LISTEN_PORT"
   printf 'Subscription: public %s -> guest TCP port %s\n' "${SUB_PUBLIC_PORT:-$LISTEN_PORT}" "${SUB_LISTEN_PORT:-2096}"
   printf 'Virtualization: '; systemd-detect-virt || true
@@ -255,6 +303,7 @@ preflight() {
 # expose it through its own port-forward table.
 setup_subscription() {
   local activate=${1:-1} sub_port token unit_tmp
+  validate_plan
   sub_port=${SUB_LISTEN_PORT:-2096}
   port_is_free_or_owned "$sub_port" xray-sub
   install -d -m 750 /etc/xray-sub
@@ -279,6 +328,16 @@ setup_subscription() {
   fi
 
   printf '%s\n' "$sub_port" > /etc/xray-sub/port
+  {
+    printf 'total_display=%s\n' "$PLAN_TOTAL"
+    printf 'total_bytes=%s\n' "$PLAN_TOTAL_BYTES"
+    printf 'reset_day=%s\n' "$PLAN_RESET_DAY"
+    printf 'expire_date=%s\n' "$PLAN_EXPIRE_DATE"
+    printf 'expire_epoch=%s\n' "$PLAN_EXPIRE_EPOCH"
+  } > /etc/xray-sub/provider-plan
+  chown root:root /etc/xray-sub/provider-plan
+  chmod 600 /etc/xray-sub/provider-plan
+
   install -m 755 "$SELF_DIR/xray-sub" /usr/local/sbin/xray-sub
 
   # busybox may not be installed (minimal images), and the service user must be
@@ -295,6 +354,14 @@ setup_subscription() {
       --shell /usr/sbin/nologin xray-sub || fail '无法创建 xray-sub 用户'
   fi
   [[ $(id -u xray-sub) -ne 0 && $(id -g xray-sub) -ne 0 ]] || fail 'xray-sub 用户或组不能是 root'
+
+  # Seed the client-visible quota only on first install, after xray-sub exists.
+  # Existing userinfo is preserved so a reinstall cannot erase actual usage.
+  if [[ ! -f /etc/xray-sub/userinfo ]] && (( PLAN_TOTAL_BYTES > 0 || PLAN_EXPIRE_EPOCH > 0 )); then
+    printf 'upload=0; download=0; total=%s; expire=%s\n' "$PLAN_TOTAL_BYTES" "$PLAN_EXPIRE_EPOCH" > /etc/xray-sub/userinfo
+    chown root:xray-sub /etc/xray-sub/userinfo
+    chmod 640 /etc/xray-sub/userinfo
+  fi
   chown root:xray-sub /etc/xray-sub/userinfo 2>/dev/null || true
   chmod 640 /etc/xray-sub/userinfo 2>/dev/null || true
 
@@ -584,6 +651,25 @@ state=/usr/local/etc/xray/client.json
 sub_token_file=/etc/xray-sub/token
 sub_port_file=/etc/xray-sub/port
 sub_rules=/etc/xray-sub/rules.yaml
+plan_file=/etc/xray-sub/provider-plan
+
+show_plan() {
+  [[ -f $plan_file ]] || { echo '套餐信息：未记录（可在下次一键部署时填写）'; return 1; }
+  local total reset expire
+  total=$(sed -n 's/^total_display=//p' "$plan_file")
+  reset=$(sed -n 's/^reset_day=//p' "$plan_file")
+  expire=$(sed -n 's/^expire_date=//p' "$plan_file")
+  echo "月流量：${total:-未记录}"
+  case ${reset:-0} in
+    0) echo '重置日：无固定重置日';;
+    *) echo "重置日：每月 ${reset} 日";;
+  esac
+  if [[ ${expire:-0} == 0 ]]; then
+    echo '到期日：长期有效'
+  else
+    echo "到期日：${expire}"
+  fi
+}
 
 sub_url() {
   [[ -f $state && -s $sub_token_file ]] || { echo '尚未配置订阅'; return 1; }
@@ -605,6 +691,7 @@ show_sub() {
     printf '通用规则：%s 条\n' "$(grep -c '^- ' "$sub_rules" 2>/dev/null || echo 0)"
   fi
   echo '私有规则：请保存在 FlClash 本地覆写（不由 VPS 下发）'
+  show_plan || true
   echo '注意：HTTP 订阅链接中的令牌控制访问，但不加密传输。'
   systemctl is-active --quiet xray-sub && echo '订阅服务：运行中' || echo '订阅服务：未运行'
 }
@@ -625,6 +712,9 @@ export_sub_info() {
     echo
     echo '## 私有规则'
     echo '请从 FlClash 本地备份恢复，不由 VPS 保存或发布。'
+    echo
+    echo '## 套餐信息'
+    show_plan || true
     echo
     echo '## 说明'
     echo '这个文件含订阅地址，等同凭据。只存在自己的电脑上，不要公开。'
@@ -682,11 +772,16 @@ set_quota() {
   echo '设置订阅里显示的流量额度。Clash 会读取这些值显示用量。'
   echo '这是手动快照，不自动统计、限流或按月重置；expire 是套餐到期，不是重置日。'
   echo '留空使用 0；total=0 是否显示无限取决于客户端。真实余额请核对供应商后台。'
-  local up down total expire
+  local up down total expire plan_total=0 plan_expire=0
+  if [[ -f $plan_file ]]; then
+    plan_total=$(sed -n 's/^total_bytes=//p' "$plan_file")
+    plan_expire=$(sed -n 's/^expire_epoch=//p' "$plan_file")
+  fi
+  plan_total=${plan_total:-0}; plan_expire=${plan_expire:-0}
   read -r -p '已上传字节数 [0]: ' up; up=${up:-0}
   read -r -p '已下载字节数 [0]: ' down; down=${down:-0}
-  read -r -p '总流量字节数（0=不限，100GB=107374182400） [0]: ' total; total=${total:-0}
-  read -r -p '到期时间（Unix 时间戳，0=长期有效） [0]: ' expire; expire=${expire:-0}
+  read -r -p "总流量字节数（0=不限，100GB=107374182400） [${plan_total}]: " total; total=${total:-$plan_total}
+  read -r -p "到期时间（Unix 时间戳，0=长期有效） [${plan_expire}]: " expire; expire=${expire:-$plan_expire}
   for v in "$up" "$down" "$total" "$expire"; do
     [[ $v =~ ^[0-9]+$ ]] || { echo '只接受非负整数'; return 1; }
   done
@@ -738,6 +833,7 @@ change_sub_port() {
 case ${1:-} in
   --export) export_node; exit;;
   --sub) show_sub; exit;;
+  --plan) show_plan; exit;;
 esac
 
 while true; do
@@ -755,7 +851,8 @@ while true; do
   9. 设置流量额度（客户端显示）
  10. 导出订阅信息到文件（换电脑用）
  11. 备份
- 12. 导出客户端节点
+  12. 导出客户端节点
+  13. 套餐信息（月流量/重置日/到期日）
   0. 退出
 MENU
   read -r -p '选择: ' option || exit 0
@@ -784,6 +881,7 @@ MENU
     10) export_sub_info || echo '导出失败';;
     11) backup_all || echo '备份失败，请检查磁盘';;
     12) export_node || echo '导出失败';;
+    13) show_plan || echo '未记录套餐信息（可在下次一键部署时填写）';;
     0) exit 0;;
     *) echo '无效选项';;
   esac

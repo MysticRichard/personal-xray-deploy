@@ -8,7 +8,7 @@ bash "$root/tests/test-one-click.sh"
 # serverName are accepted via Enter (documented defaults).
 rm -f /root/xray-client/node.json /usr/local/etc/xray/client.json /usr/local/etc/xray/config.json
 export PATH=/test-shims:$PATH
-unset SERVER_ADDRESS PUBLIC_PORT LISTEN_PORT REALITY_DEST REALITY_SERVER_NAME SUB_PUBLIC_PORT SUB_LISTEN_PORT
+unset SERVER_ADDRESS PUBLIC_PORT LISTEN_PORT REALITY_DEST REALITY_SERVER_NAME SUB_PUBLIC_PORT SUB_LISTEN_PORT PLAN_TOTAL PLAN_RESET_DAY PLAN_EXPIRE
 printf '%s\n' \
   '203.0.113.10' \
   '28443' \
@@ -16,7 +16,10 @@ printf '%s\n' \
   '' \
   '' \
   '28996' \
-  '18996' > /run/answers.txt
+  '18996' \
+  '100GB' \
+  '1' \
+  '2027-10-26' > /run/answers.txt
 bash <(cat "$root/one-click.sh") </run/answers.txt >/run/public.log 2>&1 || { cat /run/public.log; exit 1; }
 [[ -s /root/xray-client/node.json ]]
 jq -e '.proxies[0].port == 28443 and .proxies[0].server == "203.0.113.10"' /root/xray-client/node.json >/dev/null

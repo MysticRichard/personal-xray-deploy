@@ -8,7 +8,7 @@
 bash <(curl -fsSL https://raw.githubusercontent.com/MysticRichard/personal-xray-deploy/main/one-click.sh)
 ```
 
-安装过程会依次询问七项。第 4、5 项有默认值，其余按平台实际填写；重复安装会把已保存值作为默认值显示，但仍会逐项询问：
+安装过程会依次询问十项。第 4、5 项和套餐项有默认值，其余按平台实际填写；重复安装会把已保存值作为默认值显示，但仍会逐项询问：
 
 | # | 项目 | 说明 |
 |---|---|---|
@@ -19,6 +19,9 @@ bash <(curl -fsSL https://raw.githubusercontent.com/MysticRichard/personal-xray-
 | 5 | serverName | 默认跟随目标域名，必须与目标 host 一致 |
 | 6 | 订阅公网 TCP 端口 | 端口转发表的订阅「外部端口」 |
 | 7 | 订阅内部 TCP 端口 | 必须 ≥1024；订阅 HTTP 服务以非 root 用户运行 |
+| 8 | 月流量 | 示例 `100GB`、`1TB`、`0`=不限；按 1024 进制换算为字节 |
+| 9 | 流量重置日 | `1`～`31`，`0`=无固定重置日；只记录/展示，不是客户端标准字段 |
+| 10 | 套餐到期日 | `YYYY-MM-DD`，`0`=长期有效；写入订阅 `expire` |
 
 装完会直接打印订阅地址：
 
@@ -48,7 +51,8 @@ xray-admin
 9. 设置流量额度（手动快照）
 10. 导出订阅信息到文件
 11. 备份
-12. 导出客户端节点
+  12. 导出客户端节点
+  13. 套餐信息（月流量/重置日/到期日）
 0. 退出
 ```
 
@@ -88,6 +92,7 @@ xray-admin
 - 128 MB 是下限，已针对性做内存优化，但仍建议条件允许时升级。
 - 订阅是 HTTP，令牌只控制访问，不加密传输。
 - 流量额度是手动显示快照，不自动统计、限流或按月重置；真实套餐以供应商后台为准。
+- 部署时会询问月流量、重置日、到期日；月流量/到期日会写入订阅额度头，重置日只在 `xray-admin --plan`/私有记录中展示，客户端没有标准重置日字段。
 - 私有设备规则只保存在客户端 FlClash，不进 VPS、不进订阅、不进公开仓库。
 - 安装器锁定 Xray **v26.6.27 + tcp + Apple 目标**，这是实测与 FlClash/mihomo 兼容的组合；v26.7.11+ 的 REALITY `minClientVer` 默认值会拒绝 mihomo。
 
@@ -112,7 +117,8 @@ xray-admin
 
 ```bash
 bash tests/test-validation-behaviour.sh   # 参数/端口校验真实行为
-bash tests/test-entrypoint-prompts.sh     # 七项交互与默认值
+bash tests/test-plan-validation.sh        # 100GB/1TB/日期/重置日格式
+bash tests/test-entrypoint-prompts.sh     # 十项交互、套餐示例与默认值
 bash tests/test-public-bundle.sh          # 无实例参数或凭据泄露
 bash tests/test-preflight-http.sh         # 预检策略回归
 ```

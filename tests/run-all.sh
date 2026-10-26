@@ -9,6 +9,7 @@ if [[ ${1:-} == --failure-self-test ]]; then
   exit 0
 fi
 bash "$root/tests/test-validation-behaviour.sh"
+bash "$root/tests/test-plan-validation.sh"
 bash "$root/tests/test-preflight-http.sh"
 bash "$root/tests/test-bind-address.sh"
 bash "$root/tests/test-sub-unit.sh"

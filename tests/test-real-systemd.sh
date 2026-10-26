@@ -145,6 +145,9 @@ export REALITY_DEST=target.example:443
 export REALITY_SERVER_NAME=target.example
 export SUB_PUBLIC_PORT=28996
 export SUB_LISTEN_PORT=$sub_port
+export PLAN_TOTAL=100GB
+export PLAN_RESET_DAY=1
+export PLAN_EXPIRE=2027-10-26
 
 if ! bash "$payload/install-xray.sh" --install >"$request_dir/install.log" 2>&1; then
   cat "$request_dir/install.log" >&2
@@ -157,6 +160,13 @@ if ! bash "$payload/install-xray.sh" --install >"$request_dir/install.log" 2>&1;
 fi
 jq -e '.inbounds[0].streamSettings.network == "tcp"' /usr/local/etc/xray/config.json >/dev/null \
   || fail 'tested FlClash transport is missing'
+grep -q '^total_bytes=107374182400$' /etc/xray-sub/provider-plan || fail 'plan total was not recorded'
+grep -q '^reset_day=1$' /etc/xray-sub/provider-plan || fail 'plan reset day was not recorded'
+grep -q '^expire_date=2027-10-26$' /etc/xray-sub/provider-plan || fail 'plan expiry was not recorded'
+/usr/local/sbin/xray-admin --plan >"$request_dir/plan.txt" || fail 'xray-admin --plan failed'
+grep -q '月流量：100GB' "$request_dir/plan.txt" || fail 'admin plan total output is wrong'
+grep -q '重置日：每月 1 日' "$request_dir/plan.txt" || fail 'admin reset-day output is wrong'
+grep -q '到期日：2027-10-26' "$request_dir/plan.txt" || fail 'admin expiry output is wrong'
 
 assert_active() {
   systemctl is-active --quiet "$1" || fail 'service is not active'
