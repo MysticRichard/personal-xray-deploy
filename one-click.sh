@@ -54,14 +54,19 @@ printf '\n个人 Xray 一键安装\n代理  公网 %s:%s -> 内部 TCP %s\n订�
 echo '依次执行：依赖检查、目标检测、下载校验、配置检查、服务启动、订阅生成。'
 echo '不修改端口映射、系统源、宿主内核或防火墙。'
 missing=0
-for tool in curl openssl unzip jq ss free sha256sum timeout; do
+for tool in curl openssl unzip jq ss free sha256sum timeout busybox; do
   command -v "$tool" >/dev/null || missing=1
 done
 if ((missing)); then
   export DEBIAN_FRONTEND=noninteractive
   apt-get update
-  apt-get install -y --no-install-recommends ca-certificates curl openssl unzip jq iproute2 procps
+  apt-get install -y --no-install-recommends \
+    ca-certificates curl openssl unzip jq iproute2 procps busybox
 fi
+# Re-check: an apt failure above must stop here with a clear reason.
+for tool in curl openssl unzip jq ss free sha256sum timeout busybox; do
+  command -v "$tool" >/dev/null || { echo "缺少依赖：$tool，请先手动安装后重试" >&2; exit 1; }
+done
 work=$(mktemp -d /tmp/xray-one-click.XXXXXXXX)
 cleanup() { rm -rf "$work"; }
 trap cleanup EXIT
@@ -185,8 +190,10 @@ setup_subscription() {
 
   if [[ ! -s /etc/xray-sub/token ]]; then
     openssl rand -hex 16 > /etc/xray-sub/token
-    chmod 600 /etc/xray-sub/token
   fi
+  # Enforce on every run: a pre-existing or restored file may be world-readable.
+  chmod 600 /etc/xray-sub/token
+  chown root:root /etc/xray-sub/token
   token=$(tr -d '\r\n' < /etc/xray-sub/token)
 
   # Keep user edits on reinstall; seed from the packaged template otherwise.

@@ -116,8 +116,10 @@ setup_subscription() {
 
   if [[ ! -s /etc/xray-sub/token ]]; then
     openssl rand -hex 16 > /etc/xray-sub/token
-    chmod 600 /etc/xray-sub/token
   fi
+  # Enforce on every run: a pre-existing or restored file may be world-readable.
+  chmod 600 /etc/xray-sub/token
+  chown root:root /etc/xray-sub/token
   token=$(tr -d '\r\n' < /etc/xray-sub/token)
 
   # Keep user edits on reinstall; seed from the packaged template otherwise.
