@@ -87,6 +87,7 @@ xray-admin
 - 订阅是 HTTP，令牌只控制访问，不加密传输。
 - 流量额度是手动显示快照，不自动统计、限流或按月重置；真实套餐以供应商后台为准。
 - 私有设备规则只保存在客户端 FlClash，不进 VPS、不进订阅、不进公开仓库。
+- 已为 FlClash/mihomo 显式设置 REALITY `minClientVer=1.8.2`；删掉它会让 mihomo 报 `REALITY authentication failed`。
 
 ## 文件说明
 

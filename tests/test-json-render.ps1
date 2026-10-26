@@ -20,6 +20,7 @@ try {
     if ($c.routing.domainStrategy -ne 'IPOnDemand') { throw 'IP rules bypass domain targets' }
     if ('geoip:private' -notin $c.routing.rules[0].ip) { throw 'Private IP protection missing' }
     if ($c.inbounds[0].streamSettings.realitySettings.shortIds.Count -ne 1) { throw 'Unneeded extra short IDs' }
+    if ($c.inbounds[0].streamSettings.realitySettings.minClientVer -ne '1.8.2') { throw 'FlClash/mihomo REALITY compatibility missing' }
     Write-Output 'PASS: actual install script renders one authenticated listener with internal NAT port and IP rules'
 } finally {
     Remove-Item -LiteralPath $temp -Force -ErrorAction SilentlyContinue

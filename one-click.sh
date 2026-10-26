@@ -3,7 +3,7 @@
 set -Eeuo pipefail
 set +x
 umask 077
-SCRIPT_VERSION=2026.10.26-review2
+SCRIPT_VERSION=2026.10.26-review3
 printf '个人 Xray 安装脚本 %s\n' "$SCRIPT_VERSION"
 [[ $EUID -eq 0 ]] || { echo '请使用 root 运行'; exit 1; }
 [[ -f /etc/debian_version && -d /run/systemd/system ]] || { echo '需要 Debian + systemd'; exit 1; }
@@ -176,6 +176,8 @@ verify_saved_key_pair() {
 render() {
   validate
   validate_secrets
+  # FlClash/mihomo reports REALITY client version 1.8.2. Xray v26.7.11+
+  # defaults minClientVer to 26.3.27 and rejects mihomo unless this is explicit.
   # noclobber: never replace an existing file, even through a symlink.
   (set -o noclobber; cat > "$1" <<EOF
 {
@@ -187,7 +189,8 @@ render() {
     "streamSettings": {
       "network": "raw", "security": "reality",
       "realitySettings": {"show": false, "target": "$REALITY_DEST", "xver": 0,
-        "serverNames": ["$REALITY_SERVER_NAME"], "privateKey": "$PRIVATE_KEY", "shortIds": ["$SHORT_ID"]}
+        "serverNames": ["$REALITY_SERVER_NAME"], "privateKey": "$PRIVATE_KEY", "shortIds": ["$SHORT_ID"],
+        "minClientVer": "1.8.2"}
     }
   }],
   "outbounds": [{"tag": "direct", "protocol": "freedom"}, {"tag": "block", "protocol": "blackhole"}],

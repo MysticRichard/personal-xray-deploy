@@ -40,6 +40,16 @@
 
 想换目标时，第 4 项填 `域名:443`，第 5 项填同一域名。不要用 Apple 系域名；脚本会直接拒绝这类目标。
 
+## FlClash/mihomo 兼容
+
+Xray v26.7.11 起，REALITY 服务端默认 `minClientVer=26.3.27`；mihomo/FlClash 在握手时上报的客户端版本是 `1.8.2`，会被拒绝并显示 `REALITY authentication failed`。脚本显式写入：
+
+```json
+"minClientVer": "1.8.2"
+```
+
+这是保留 mihomo/FlClash 兼容性的必要字段。手动改配置时不要删掉它。旧版本 Xray v26.6.27 没有这个默认限制，所以也能工作。
+
 ## 密钥与重复安装
 
 - 首次安装生成 UUID、X25519 密钥对和 shortId。

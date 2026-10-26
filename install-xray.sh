@@ -101,6 +101,8 @@ verify_saved_key_pair() {
 render() {
   validate
   validate_secrets
+  # FlClash/mihomo reports REALITY client version 1.8.2. Xray v26.7.11+
+  # defaults minClientVer to 26.3.27 and rejects mihomo unless this is explicit.
   # noclobber: never replace an existing file, even through a symlink.
   (set -o noclobber; cat > "$1" <<EOF
 {
@@ -112,7 +114,8 @@ render() {
     "streamSettings": {
       "network": "raw", "security": "reality",
       "realitySettings": {"show": false, "target": "$REALITY_DEST", "xver": 0,
-        "serverNames": ["$REALITY_SERVER_NAME"], "privateKey": "$PRIVATE_KEY", "shortIds": ["$SHORT_ID"]}
+        "serverNames": ["$REALITY_SERVER_NAME"], "privateKey": "$PRIVATE_KEY", "shortIds": ["$SHORT_ID"],
+        "minClientVer": "1.8.2"}
     }
   }],
   "outbounds": [{"tag": "direct", "protocol": "freedom"}, {"tag": "block", "protocol": "blackhole"}],
