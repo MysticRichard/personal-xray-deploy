@@ -12,8 +12,8 @@ rm -f /run/test-xray.pid /run/test-sub.pid
 # installer's non-public-target guard is not defeated by the host DNS mode.
 grep -qE '^1\.1\.1\.1[[:space:]]+example\.com$' /etc/hosts \
   || printf '1.1.1.1 example.com\n' >>/etc/hosts
-grep -qE '^1\.1\.1\.1[[:space:]]+www\.microsoft\.com$' /etc/hosts \
-  || printf '1.1.1.1 www.microsoft.com\n' >>/etc/hosts
+grep -qE '^1\.1\.1\.1[[:space:]]+www\.apple\.com$' /etc/hosts \
+  || printf '1.1.1.1 www.apple.com\n' >>/etc/hosts
 mkdir -p /run/systemd/system /test-shims
 cat > /test-shims/curl <<'EOF'
 #!/usr/bin/env bash

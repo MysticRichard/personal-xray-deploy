@@ -15,7 +15,7 @@ bash <(curl -fsSL https://raw.githubusercontent.com/MysticRichard/personal-xray-
 | 1 | 公网 IP 或域名 | 平台显示的公网地址 |
 | 2 | 代理公网 TCP 端口 | 端口转发表的「外部端口」 |
 | 3 | 代理内部 TCP 端口 | 端口转发表的「内部端口」；无 NAT 时与公网端口相同 |
-| 4 | REALITY 目标 | 默认 `www.microsoft.com:443`，仅作起始值；每次安装都会复验 TLS 1.3、h2 和证书，可按需换成自己的目标 |
+| 4 | REALITY 目标 | 默认 `www.apple.com:443`，仅作起始值；每次安装都会复验 TLS 1.3、h2 和证书，可按需换成自己的目标 |
 | 5 | serverName | 默认跟随目标域名，必须与目标 host 一致 |
 | 6 | 订阅公网 TCP 端口 | 端口转发表的订阅「外部端口」 |
 | 7 | 订阅内部 TCP 端口 | 必须 ≥1024；订阅 HTTP 服务以非 root 用户运行 |
@@ -87,7 +87,7 @@ xray-admin
 - 订阅是 HTTP，令牌只控制访问，不加密传输。
 - 流量额度是手动显示快照，不自动统计、限流或按月重置；真实套餐以供应商后台为准。
 - 私有设备规则只保存在客户端 FlClash，不进 VPS、不进订阅、不进公开仓库。
-- 已为 FlClash/mihomo 显式设置 REALITY `minClientVer=1.8.2`；删掉它会让 mihomo 报 `REALITY authentication failed`。
+- 安装器锁定 Xray **v26.6.27 + tcp + Apple 目标**，这是实测与 FlClash/mihomo 兼容的组合；v26.7.11+ 的 REALITY `minClientVer` 默认值会拒绝 mihomo。
 
 ## 文件说明
 

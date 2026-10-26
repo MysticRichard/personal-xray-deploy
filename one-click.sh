@@ -3,7 +3,7 @@
 set -Eeuo pipefail
 set +x
 umask 077
-SCRIPT_VERSION=2026.10.26-review3
+SCRIPT_VERSION=2026.10.26-review4
 printf '个人 Xray 安装脚本 %s\n' "$SCRIPT_VERSION"
 [[ $EUID -eq 0 ]] || { echo '请使用 root 运行'; exit 1; }
 [[ -f /etc/debian_version && -d /run/systemd/system ]] || { echo '需要 Debian + systemd'; exit 1; }
@@ -57,7 +57,7 @@ ask() {
 ask SERVER_ADDRESS 'VPS 公网 IP 或域名' "${SERVER_ADDRESS:-}"
 ask PUBLIC_PORT '代理公网 TCP 端口' "${PUBLIC_PORT:-}"
 ask LISTEN_PORT '代理内部 TCP 端口（无 NAT 时与公网相同）' "${LISTEN_PORT:-}"
-ask REALITY_DEST 'REALITY 目标 host:port（默认值并不保证防封，安装时会校验）' "${REALITY_DEST:-www.microsoft.com:443}"
+ask REALITY_DEST 'REALITY 目标 host:port（默认值并不保证防封，安装时会校验）' "${REALITY_DEST:-www.apple.com:443}"
 # A custom target should not silently retain the Microsoft SNI.
 default_sni=${REALITY_DEST%:*}
 ask REALITY_SERVER_NAME 'REALITY serverName' "$default_sni"
@@ -77,8 +77,10 @@ cat > "$work/install-xray.sh" <<'XRAY_INSTALL_PAYLOAD'
 # Single-user Debian deployment. Run --preflight before --install.
 set -Eeuo pipefail
 umask 077
-VERSION=v26.10.21
-ARCHIVE_SHA256=0eec3ed4163c273d8c8bf821f7d219e257921cf584aa3fb970715e458e631978
+# v26.6.27 is the last release before the REALITY minClientVer default changed.
+# It is the combination tested with FlClash/mihomo and the Apple target.
+VERSION=v26.6.27
+ARCHIVE_SHA256=b3e5902d06d6282fe53cfa2fc426058b9aeaa429b2c812e20887cd47f26d08bf
 CONFIG=/usr/local/etc/xray/config.json
 STATE=/usr/local/etc/xray/client.json
 BIN=/usr/local/bin/xray
@@ -109,10 +111,6 @@ validate() {
   valid_port "$DEST_PORT" || fail 'Invalid target port.'
   [[ ${REALITY_SERVER_NAME:-} =~ ^[A-Za-z0-9][A-Za-z0-9.-]*$ ]] || fail 'Set REALITY_SERVER_NAME.'
   [[ ${DEST_HOST,,} == "${REALITY_SERVER_NAME,,}" ]] || fail 'Use the same target hostname and serverName for this single-node template.'
-  case "${REALITY_SERVER_NAME,,}" in
-    apple.com|*.apple.com|icloud.com|*.icloud.com|mzstatic.com|*.mzstatic.com|me.com|*.me.com)
-      fail 'Choose a different target; existing Xray logs warn about Apple targets.';;
-  esac
 }
 service_owns_port() {
   local port="$1" unit="$2" main_pid pid expected_exe
@@ -176,8 +174,6 @@ verify_saved_key_pair() {
 render() {
   validate
   validate_secrets
-  # FlClash/mihomo reports REALITY client version 1.8.2. Xray v26.7.11+
-  # defaults minClientVer to 26.3.27 and rejects mihomo unless this is explicit.
   # noclobber: never replace an existing file, even through a symlink.
   (set -o noclobber; cat > "$1" <<EOF
 {
@@ -187,10 +183,9 @@ render() {
     "protocol": "vless",
     "settings": {"clients": [{"id": "$CLIENT_UUID", "flow": "xtls-rprx-vision"}], "decryption": "none"},
     "streamSettings": {
-      "network": "raw", "security": "reality",
+      "network": "tcp", "security": "reality",
       "realitySettings": {"show": false, "target": "$REALITY_DEST", "xver": 0,
-        "serverNames": ["$REALITY_SERVER_NAME"], "privateKey": "$PRIVATE_KEY", "shortIds": ["$SHORT_ID"],
-        "minClientVer": "1.8.2"}
+        "serverNames": ["$REALITY_SERVER_NAME"], "privateKey": "$PRIVATE_KEY", "shortIds": ["$SHORT_ID"]}
     }
   }],
   "outbounds": [{"tag": "direct", "protocol": "freedom"}, {"tag": "block", "protocol": "blackhole"}],

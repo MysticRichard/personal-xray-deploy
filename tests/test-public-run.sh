@@ -20,7 +20,7 @@ printf '%s\n' \
 bash <(cat "$root/one-click.sh") </run/answers.txt >/run/public.log 2>&1 || { cat /run/public.log; exit 1; }
 [[ -s /root/xray-client/node.json ]]
 jq -e '.proxies[0].port == 28443 and .proxies[0].server == "203.0.113.10"' /root/xray-client/node.json >/dev/null
-grep -q 'www.microsoft.com' /usr/local/etc/xray/config.json
+grep -q 'www.apple.com' /usr/local/etc/xray/config.json
 systemctl is-active --quiet xray
 ss -lntH 'sport = :18443' | grep -q .
 systemctl stop xray

@@ -121,7 +121,7 @@ LISTEN_PORT=18443 PUBLIC_PORT=28443 REALITY_DEST=example.com:443 \
 REALITY_SERVER_NAME=example.com bash "$script" --render "$render_dir/config.json" \
   >"$render_dir/render.log" 2>&1 || { cat "$render_dir/render.log" >&2; fail 'renderer rejected valid payload'; }
 grep -q '"port": 18443' "$render_dir/config.json" || fail 'renderer did not write requested port'
-grep -q '"minClientVer": "1.8.2"' "$render_dir/config.json" || fail 'renderer did not add FlClash/mihomo REALITY compatibility'
+grep -q '"network": "tcp"' "$render_dir/config.json" || fail 'renderer did not use the tested FlClash transport'
 grep -q 'PRIVATE_KEY' "$render_dir/config.json" && fail 'renderer leaked variable names'
 ! grep -q 'ABCDEFGHIJKLMNOPQRSTUVWXYZ' "$render_dir/render.log" || fail 'renderer logged a secret'
 pass 'real renderer writes valid payload without logging secrets'

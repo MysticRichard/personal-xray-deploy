@@ -15,7 +15,7 @@ docker run --rm \
 
 ## 真实 systemd 安装测试
 
-需要一次性 systemd 容器、`/release.zip` 夹具和 root 权限，详见 `tests/test-real-systemd.sh` 顶部注释。它会清理该容器内的 Xray 状态，**不要在生产 VPS 上直接运行**。
+需要一次性 systemd 容器、`/release.zip` 夹具和 root 权限，详见 `tests/test-real-systemd.sh` 顶部注释。`/release.zip` 必须与 `install-xray.sh` 当前的 `VERSION`/`ARCHIVE_SHA256` 一致（当前为 v26.6.27），否则校验会按设计失败。它会清理该容器内的 Xray 状态，**不要在生产 VPS 上直接运行**。
 
 ```bash
 docker exec xray-review-systemd bash /work/tests/test-real-systemd.sh

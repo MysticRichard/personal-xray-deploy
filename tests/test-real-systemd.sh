@@ -155,8 +155,8 @@ if ! bash "$payload/install-xray.sh" --install >"$request_dir/install.log" 2>&1;
     -verify_hostname target.example -verify_return_error -tls1_3 -alpn h2 </dev/null >&2 || true
   fail 'initial real-systemd install failed'
 fi
-jq -e '.inbounds[0].streamSettings.realitySettings.minClientVer == "1.8.2"' /usr/local/etc/xray/config.json >/dev/null \
-  || fail 'FlClash/mihomo REALITY compatibility field is missing'
+jq -e '.inbounds[0].streamSettings.network == "tcp"' /usr/local/etc/xray/config.json >/dev/null \
+  || fail 'tested FlClash transport is missing'
 
 assert_active() {
   systemctl is-active --quiet "$1" || fail 'service is not active'

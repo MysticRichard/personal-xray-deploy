@@ -2,8 +2,10 @@
 # Single-user Debian deployment. Run --preflight before --install.
 set -Eeuo pipefail
 umask 077
-VERSION=v26.10.21
-ARCHIVE_SHA256=0eec3ed4163c273d8c8bf821f7d219e257921cf584aa3fb970715e458e631978
+# v26.6.27 is the last release before the REALITY minClientVer default changed.
+# It is the combination tested with FlClash/mihomo and the Apple target.
+VERSION=v26.6.27
+ARCHIVE_SHA256=b3e5902d06d6282fe53cfa2fc426058b9aeaa429b2c812e20887cd47f26d08bf
 CONFIG=/usr/local/etc/xray/config.json
 STATE=/usr/local/etc/xray/client.json
 BIN=/usr/local/bin/xray
@@ -34,10 +36,6 @@ validate() {
   valid_port "$DEST_PORT" || fail 'Invalid target port.'
   [[ ${REALITY_SERVER_NAME:-} =~ ^[A-Za-z0-9][A-Za-z0-9.-]*$ ]] || fail 'Set REALITY_SERVER_NAME.'
   [[ ${DEST_HOST,,} == "${REALITY_SERVER_NAME,,}" ]] || fail 'Use the same target hostname and serverName for this single-node template.'
-  case "${REALITY_SERVER_NAME,,}" in
-    apple.com|*.apple.com|icloud.com|*.icloud.com|mzstatic.com|*.mzstatic.com|me.com|*.me.com)
-      fail 'Choose a different target; existing Xray logs warn about Apple targets.';;
-  esac
 }
 service_owns_port() {
   local port="$1" unit="$2" main_pid pid expected_exe
@@ -101,8 +99,6 @@ verify_saved_key_pair() {
 render() {
   validate
   validate_secrets
-  # FlClash/mihomo reports REALITY client version 1.8.2. Xray v26.7.11+
-  # defaults minClientVer to 26.3.27 and rejects mihomo unless this is explicit.
   # noclobber: never replace an existing file, even through a symlink.
   (set -o noclobber; cat > "$1" <<EOF
 {
@@ -112,10 +108,9 @@ render() {
     "protocol": "vless",
     "settings": {"clients": [{"id": "$CLIENT_UUID", "flow": "xtls-rprx-vision"}], "decryption": "none"},
     "streamSettings": {
-      "network": "raw", "security": "reality",
+      "network": "tcp", "security": "reality",
       "realitySettings": {"show": false, "target": "$REALITY_DEST", "xver": 0,
-        "serverNames": ["$REALITY_SERVER_NAME"], "privateKey": "$PRIVATE_KEY", "shortIds": ["$SHORT_ID"],
-        "minClientVer": "1.8.2"}
+        "serverNames": ["$REALITY_SERVER_NAME"], "privateKey": "$PRIVATE_KEY", "shortIds": ["$SHORT_ID"]}
     }
   }],
   "outbounds": [{"tag": "direct", "protocol": "freedom"}, {"tag": "block", "protocol": "blackhole"}],

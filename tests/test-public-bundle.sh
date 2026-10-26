@@ -45,7 +45,7 @@ bundle_count=$(grep -c '^- ' "$root/one-click.sh" 2>/dev/null || echo 0)
 [[ $bundle_count == 8633 ]] || { echo "FAIL: one-click bundle has $bundle_count rules, expected 8633"; fail=1; }
 
 # A default REALITY target is allowed, but it must be documented and overridable.
-grep -q 'www.microsoft.com:443' "$root/one-click.sh" \
+grep -q 'www.apple.com:443' "$root/one-click.sh" \
   || { echo 'FAIL: documented default REALITY target missing from prompt'; fail=1; }
 
 ((fail == 0))

@@ -34,21 +34,17 @@
 
 ## REALITY 目标怎么选
 
-脚本预置 `www.microsoft.com:443` 只是让第一次安装有可用的起始值，不代表它是长期推荐目标，也不保证不被封。Xray 的运行日志可能对常见目标给出警告；目标站的可用性和封锁情况会随时间、地区和网络变化。
+脚本预置 `www.apple.com:443` 是当前与 FlClash/mihomo 实测兼容的起始目标，不代表它长期不被封。Xray 的运行日志会警告 Apple/Microsoft 这类常见目标；目标站的可用性和封锁情况会随时间、地区和网络变化。
 
 脚本每次安装都会**实时复验**：解析结果不能是私网/回环/CGNAT/IPv6 本地地址，证书、TLS 1.3、ALPN h2 必须通过。HTTP 状态只打印出来参考，不作为安装门槛。没有“实测长期可用”的承诺。
 
-想换目标时，第 4 项填 `域名:443`，第 5 项填同一域名。不要用 Apple 系域名；脚本会直接拒绝这类目标。
+想换目标时，第 4 项填 `域名:443`，第 5 项填同一域名。换目标前请确认它支持 TLS 1.3、h2 和证书验证；目标变更后客户端订阅也需要重新导入。
 
 ## FlClash/mihomo 兼容
 
-Xray v26.7.11 起，REALITY 服务端默认 `minClientVer=26.3.27`；mihomo/FlClash 在握手时上报的客户端版本是 `1.8.2`，会被拒绝并显示 `REALITY authentication failed`。脚本显式写入：
+安装器锁定 **Xray v26.6.27**、传输 `tcp`、默认目标 `www.apple.com`。这是实测通过 FlClash/mihomo 的组合。
 
-```json
-"minClientVer": "1.8.2"
-```
-
-这是保留 mihomo/FlClash 兼容性的必要字段。手动改配置时不要删掉它。旧版本 Xray v26.6.27 没有这个默认限制，所以也能工作。
+Xray v26.7.11 起，REALITY 服务端默认 `minClientVer=26.3.27`，而 mihomo/FlClash 上报的客户端版本是 `1.8.2`，会显示 `REALITY authentication failed`；当前 v26.6.27 没有这个默认限制。升级 Xray 前必须先用 FlClash 实测，不要只跑 `xray -test`。
 
 ## 密钥与重复安装
 

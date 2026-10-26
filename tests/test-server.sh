@@ -23,7 +23,7 @@ assert r['rules'][0]['outboundTag'] == 'block'
 assert 'geoip:private' in r['rules'][0]['ip']
 assert c['log']['access'] == 'none'
 assert i['streamSettings']['realitySettings']['shortIds'] == ['0123456789abcdef']
-assert i['streamSettings']['realitySettings']['minClientVer'] == '1.8.2', 'FlClash/mihomo REALITY client version must be accepted'
+assert i['streamSettings']['network'] == 'tcp', 'server transport must match the tested FlClash combination'
 PY
 if [[ -n "${XRAY_BIN:-}" ]]; then
   "$XRAY_BIN" run -test -config "$work/config.json"
