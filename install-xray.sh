@@ -359,6 +359,66 @@ UNIT
 INFO
 }
 
+download_release() {
+  local out=$1 release_path url best_url='' best_speed=0 probe code speed
+  if [[ -n ${XRAY_ARCHIVE:-} ]]; then
+    [[ -f $XRAY_ARCHIVE ]] || fail "XRAY_ARCHIVE not found: $XRAY_ARCHIVE"
+    cp -- "$XRAY_ARCHIVE" "$out" || fail 'Could not copy XRAY_ARCHIVE.'
+    echo "Using local archive: $XRAY_ARCHIVE" >&2
+    printf '%s  %s\n' "$ARCHIVE_SHA256" "$out" | sha256sum --check --status \
+      || fail 'XRAY_ARCHIVE checksum mismatch.'
+    return 0
+  fi
+
+  release_path="XTLS/Xray-core/releases/download/$VERSION/Xray-linux-64.zip"
+  local -a urls=()
+  if [[ -n ${XRAY_URL:-} ]]; then
+    urls=("$XRAY_URL")
+  else
+    urls=(
+      "https://github.com/$release_path"
+      "https://ghfast.top/https://github.com/$release_path"
+      "https://gh-proxy.com/https://github.com/$release_path"
+      "https://ghproxy.net/https://github.com/$release_path"
+      "https://github.moeyy.xyz/https://github.com/$release_path"
+    )
+  fi
+
+  # Probe a small range from each source and prefer the fastest. The SHA256
+  # below is still the trust anchor; a mirror only changes the transfer path.
+  for url in "${urls[@]}"; do
+    probe=$(curl -L --range 0-262143 --max-time 8 --connect-timeout 5 \
+      -o /dev/null -w '%{http_code} %{speed_download}' "$url" 2>/dev/null) || continue
+    code=${probe%% *}
+    speed=${probe##* }
+    [[ $code == 200 || $code == 206 ]] || continue
+    if [[ -z $best_url ]] || awk -v s="$speed" -v b="$best_speed" 'BEGIN { exit !(s > b) }'; then
+      best_url=$url
+      best_speed=$speed
+    fi
+  done
+  [[ -n $best_url ]] || best_url=${urls[0]}
+  echo "Release source: $best_url (probe ${best_speed} B/s)" >&2
+
+  local -a tries=("$best_url")
+  for url in "${urls[@]}"; do
+    [[ $url == "$best_url" ]] || tries+=("$url")
+  done
+  for url in "${tries[@]}"; do
+    rm -f "$out"
+    if curl --fail --location --retry 3 --retry-delay 2 --retry-all-errors \
+      --continue-at - --connect-timeout 15 --max-time 600 \
+      --speed-time 60 --speed-limit 1024 \
+      "$url" -o "$out"; then
+      if printf '%s  %s\n' "$ARCHIVE_SHA256" "$out" | sha256sum --check --status; then
+        return 0
+      fi
+    fi
+    echo "Release source failed: $url" >&2
+  done
+  return 1
+}
+
 install_node() {  preflight
   [[ -f "$SELF_DIR/xray-admin" ]] || fail 'Copy the full deployment folder, including xray-admin.'
   bash -n "$SELF_DIR/xray-sub"
@@ -435,22 +495,7 @@ install_node() {  preflight
   snapshot subunit /etc/systemd/system/xray-sub.service
   snapshot subbin /usr/local/sbin/xray-sub
   echo 'STEP: obtain release' >&2
-  if [[ -n ${XRAY_ARCHIVE:-} ]]; then
-    [[ -f $XRAY_ARCHIVE ]] || fail "XRAY_ARCHIVE not found: $XRAY_ARCHIVE"
-    cp -- "$XRAY_ARCHIVE" "$stage/core.zip" || fail 'Could not copy XRAY_ARCHIVE.'
-    echo "Using local archive: $XRAY_ARCHIVE" >&2
-  else
-    # GitHub can be slow from some networks. Resume partial downloads and allow
-    # enough time; the SHA256 check still gates every archive. XRAY_URL can
-    # point at a trusted accelerator/mirror, but the digest must still match.
-    local release_url
-    release_url=${XRAY_URL:-https://github.com/XTLS/Xray-core/releases/download/$VERSION/Xray-linux-64.zip}
-    curl --fail --location --retry 5 --retry-delay 3 --retry-all-errors \
-      --continue-at - --connect-timeout 20 --max-time 900 \
-      --speed-time 60 --speed-limit 1024 \
-      "$release_url" -o "$stage/core.zip"
-  fi
-  printf '%s  %s\n' "$ARCHIVE_SHA256" "$stage/core.zip" | sha256sum --check --status || fail 'Release checksum mismatch.'
+  download_release "$stage/core.zip" || fail 'Release download failed; try XRAY_ARCHIVE or XRAY_URL.'
   echo 'STEP: extract release' >&2
   # Decompress only what is needed, and drop the archive immediately: on a
   # 128 MB cgroup these few tens of MB of page cache matter for the first start.
