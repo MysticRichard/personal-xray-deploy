@@ -434,8 +434,22 @@ install_node() {  preflight
   snapshot subweb /srv/sub
   snapshot subunit /etc/systemd/system/xray-sub.service
   snapshot subbin /usr/local/sbin/xray-sub
-  echo 'STEP: download release' >&2
-  curl --fail --location --retry 2 --max-time 180 "https://github.com/XTLS/Xray-core/releases/download/$VERSION/Xray-linux-64.zip" -o "$stage/core.zip"
+  echo 'STEP: obtain release' >&2
+  if [[ -n ${XRAY_ARCHIVE:-} ]]; then
+    [[ -f $XRAY_ARCHIVE ]] || fail "XRAY_ARCHIVE not found: $XRAY_ARCHIVE"
+    cp -- "$XRAY_ARCHIVE" "$stage/core.zip" || fail 'Could not copy XRAY_ARCHIVE.'
+    echo "Using local archive: $XRAY_ARCHIVE" >&2
+  else
+    # GitHub can be slow from some networks. Resume partial downloads and allow
+    # enough time; the SHA256 check still gates every archive. XRAY_URL can
+    # point at a trusted accelerator/mirror, but the digest must still match.
+    local release_url
+    release_url=${XRAY_URL:-https://github.com/XTLS/Xray-core/releases/download/$VERSION/Xray-linux-64.zip}
+    curl --fail --location --retry 5 --retry-delay 3 --retry-all-errors \
+      --continue-at - --connect-timeout 20 --max-time 900 \
+      --speed-time 60 --speed-limit 1024 \
+      "$release_url" -o "$stage/core.zip"
+  fi
   printf '%s  %s\n' "$ARCHIVE_SHA256" "$stage/core.zip" | sha256sum --check --status || fail 'Release checksum mismatch.'
   echo 'STEP: extract release' >&2
   # Decompress only what is needed, and drop the archive immediately: on a

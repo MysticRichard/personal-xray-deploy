@@ -51,6 +51,45 @@ xray-admin --plan
 
 显示月流量、重置日和到期日。月流量/到期日首次安装会写入订阅额度头；`upload=0; download=0` 是占位，不是真实已用量。重置日没有标准客户端字段，只在 `xray-admin --plan` 展示。
 
+## GitHub 下载超时 / 断点续传
+
+如果安装时出现：
+
+```text
+curl: (28) Operation timed out ... bytes received
+```
+
+说明到 GitHub 的速度太慢，不是配置错误。当前安装器已经改为最长 900 秒、自动重试和断点续传。仍不稳定时，可以先手动下载并校验：
+
+```bash
+cd /root
+curl -fL --retry 10 --retry-all-errors --continue-at - \
+  --connect-timeout 20 --max-time 1800 --speed-time 60 --speed-limit 1024 \
+  -o Xray-linux-64.zip \
+  https://github.com/XTLS/Xray-core/releases/download/v26.6.27/Xray-linux-64.zip
+echo "b3e5902d06d6282fe53cfa2fc426058b9aeaa429b2c812e20887cd47f26d08bf  Xray-linux-64.zip" | sha256sum -c -
+```
+
+如果仍然超时，**重复执行同一条 curl**；`--continue-at -` 会从已下载的位置继续。
+
+校验通过后，用本地归档安装，跳过再次下载：
+
+```bash
+XRAY_ARCHIVE=/root/Xray-linux-64.zip \
+bash <(curl -fsSL https://raw.githubusercontent.com/MysticRichard/personal-xray-deploy/main/one-click.sh)
+```
+
+`XRAY_ARCHIVE` 仍会强制校验 SHA256；不要使用未校验的第三方压缩包。可信镜像下载的同一 release 也可以，只要 SHA256 一致。
+
+也可以只替换下载地址，让安装器走加速前缀（示例，不保证可用）：
+
+```bash
+XRAY_URL='https://ghfast.top/https://github.com/XTLS/Xray-core/releases/download/v26.6.27/Xray-linux-64.zip' \
+bash <(curl -fsSL https://raw.githubusercontent.com/MysticRichard/personal-xray-deploy/main/one-click.sh)
+```
+
+仍然会校验 `b3e5902d06d6282fe53cfa2fc426058b9aeaa429b2c812e20887cd47f26d08bf`；校验失败就换来源，不要关闭校验。
+
 ## 查询订阅地址
 
 ```bash

@@ -148,6 +148,7 @@ export SUB_LISTEN_PORT=$sub_port
 export PLAN_TOTAL=100GB
 export PLAN_RESET_DAY=1
 export PLAN_EXPIRE=2027-10-26
+export XRAY_ARCHIVE=/release.zip
 
 if ! bash "$payload/install-xray.sh" --install >"$request_dir/install.log" 2>&1; then
   cat "$request_dir/install.log" >&2

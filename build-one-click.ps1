@@ -11,7 +11,7 @@ $header = @'
 set -Eeuo pipefail
 set +x
 umask 077
-SCRIPT_VERSION=2026.10.26-review5
+SCRIPT_VERSION=2026.10.27-review1
 printf '个人 Xray 安装脚本 %s\n' "$SCRIPT_VERSION"
 [[ $EUID -eq 0 ]] || { echo '请使用 root 运行'; exit 1; }
 [[ -f /etc/debian_version && -d /run/systemd/system ]] || { echo '需要 Debian + systemd'; exit 1; }
