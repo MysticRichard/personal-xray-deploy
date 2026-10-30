@@ -95,6 +95,7 @@ xray-admin
 - 部署时会询问月流量、重置日、到期日；月流量/到期日会写入订阅额度头，重置日只在 `xray-admin --plan`/私有记录中展示，客户端没有标准重置日字段。
 - 私有设备规则只保存在客户端 FlClash，不进 VPS、不进订阅、不进公开仓库。
 - 安装器自动探测 GitHub 官方与加速前缀并选最快源；也可用 [`docs/operations.md`](docs/operations.md) 的 `XRAY_URL`/`XRAY_ARCHIVE` 兜底；仍强制 SHA256 校验。
+- 预检会强制 IPv4 并打印目标 TLS 失败原因；目标不通时按 `docs/operations.md` 探测并更换目标，不要绕过证书校验。
 - 安装器锁定 Xray **v26.6.27 + tcp + Apple 目标**，这是实测与 FlClash/mihomo 兼容的组合；v26.7.11+ 的 REALITY `minClientVer` 默认值会拒绝 mihomo。
 
 ## 文件说明

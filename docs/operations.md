@@ -92,6 +92,36 @@ bash <(curl -fsSL https://raw.githubusercontent.com/MysticRichard/personal-xray-
 
 仍然会校验 `b3e5902d06d6282fe53cfa2fc426058b9aeaa429b2c812e20887cd47f26d08bf`；校验失败就换来源，不要关闭校验。
 
+## REALITY 目标 TLS 校验失败
+
+安装预检报：
+
+```text
+ERROR: Target TLS/certificate check failed.
+```
+
+说明目标站没有通过 TLS 1.3、h2 或证书校验。当前安装器会强制 IPv4 并打印 OpenSSL 的实际错误；预检失败时还没有写入节点配置，可以安全重试。
+
+先查 VPS 时间和 IPv4 目标：
+
+```bash
+date -u
+for h in www.apple.com www.cloudflare.com www.samsung.com www.mozilla.org www.oracle.com www.nvidia.com www.adobe.com www.autodesk.com www.github.com; do
+  if out=$(timeout 12 openssl s_client -4 -connect "$h:443" -servername "$h" \
+      -verify_hostname "$h" -verify_return_error -tls1_3 -alpn h2 </dev/null 2>&1) \
+      && [[ $out == *TLSv1.3* && $out == *'ALPN protocol: h2'* ]]; then
+    echo "$h PASS"
+  else
+    echo "$h FAIL"
+    printf '%s\n' "$out" | tail -5
+  fi
+done
+```
+
+- 选一个 `PASS` 的域名，第 4 项填 `域名:443`，第 5 项填同一域名，重跑安装。
+- 不要用 v26.6.27 下的 Microsoft 目标（可能 EOF）；Apple 目标有 Xray 封禁警告，能通过再自行取舍。
+- 如果所有目标都 `FAIL`，检查 `date -u`、`apt-get install -y ca-certificates` 和 VPS 出站 443；不要绕过证书校验。
+
 ## 查询订阅地址
 
 ```bash

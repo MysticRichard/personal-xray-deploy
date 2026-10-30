@@ -3,7 +3,7 @@
 set -Eeuo pipefail
 set +x
 umask 077
-SCRIPT_VERSION=2026.10.27-review2
+SCRIPT_VERSION=2026.10.30-review1
 printf '个人 Xray 安装脚本 %s\n' "$SCRIPT_VERSION"
 [[ $EUID -eq 0 ]] || { echo '请使用 root 运行'; exit 1; }
 [[ -f /etc/debian_version && -d /run/systemd/system ]] || { echo '需要 Debian + systemd'; exit 1; }
@@ -283,13 +283,22 @@ preflight() {
   done <<< "$addresses"
   ((found)) || fail 'REALITY target did not resolve to any address.'
   local probe
-  probe=$(timeout 15 openssl s_client -connect "$REALITY_DEST" -servername "$REALITY_SERVER_NAME" -verify_hostname "$REALITY_SERVER_NAME" -verify_return_error -tls1_3 -alpn h2 </dev/null 2>&1) || fail 'Target TLS/certificate check failed.'
-  [[ $probe == *TLSv1.3* && $probe == *'ALPN protocol: h2'* ]] || fail 'Target did not negotiate TLS1.3 and h2.'
+  # A reset VPS may have an IPv6 address without a working route. Force IPv4
+  # for the preflight; the target still must negotiate TLS1.3 and h2.
+  if ! probe=$(timeout 15 openssl s_client -4 -connect "$REALITY_DEST" -servername "$REALITY_SERVER_NAME" -verify_hostname "$REALITY_SERVER_NAME" -verify_return_error -tls1_3 -alpn h2 </dev/null 2>&1); then
+    printf '%s\n' "$probe" | tail -15 >&2
+    echo 'Hint: check VPS date/CA and try another REALITY target.' >&2
+    fail 'Target TLS/certificate check failed.'
+  fi
+  if [[ $probe != *TLSv1.3* || $probe != *'ALPN protocol: h2'* ]]; then
+    printf '%s\n' "$probe" | grep -E 'Protocol|ALPN|Verify return code' >&2 || true
+    fail 'Target did not negotiate TLS1.3 and h2.'
+  fi
   # REALITY only needs a valid TLS1.3/h2 target. The HTTP status is informational:
   # some CDNs answer this host inconsistently (timeouts, h2 framing errors) and
   # blocking installation on it produced false failures.
   local code
-  if code=$(curl --http1.1 --noproxy '*' --silent --max-time 10 --connect-to "$DEST_HOST:443:$DEST_HOST:$DEST_PORT" -o /dev/null -w '%{http_code}' "https://$REALITY_SERVER_NAME/" 2>/dev/null); then
+  if code=$(curl --http1.1 -4 --noproxy '*' --silent --max-time 10 --connect-to "$DEST_HOST:443:$DEST_HOST:$DEST_PORT" -o /dev/null -w '%{http_code}' "https://$REALITY_SERVER_NAME/" 2>/dev/null); then
     echo "  HTTP 状态        : $code（仅供参考，不影响判定）"
   else
     echo '  HTTP 状态        : 未取到（忽略；TLS1.3 与 h2 已通过）'
