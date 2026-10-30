@@ -11,7 +11,7 @@ $header = @'
 set -Eeuo pipefail
 set +x
 umask 077
-SCRIPT_VERSION=2026.10.30-review1
+SCRIPT_VERSION=2026.10.30-review2
 printf '个人 Xray 安装脚本 %s\n' "$SCRIPT_VERSION"
 [[ $EUID -eq 0 ]] || { echo '请使用 root 运行'; exit 1; }
 [[ -f /etc/debian_version && -d /run/systemd/system ]] || { echo '需要 Debian + systemd'; exit 1; }
@@ -29,6 +29,66 @@ fi
 for tool in curl openssl unzip jq ss free sha256sum timeout busybox nano; do
   command -v "$tool" >/dev/null || { echo "缺少依赖：$tool" >&2; exit 1; }
 done
+# `curl ... | bash` feeds the script body on stdin, so prompts would consume
+# code instead of answers. Require a terminal, or explicit unattended mode.
+if [[ ${NONINTERACTIVE:-0} != 1 && ! -t 0 ]]; then
+  cat >&2 <<'EOT'
+检测到标准输入不是终端（例如 curl ... | bash）。
+请改用：bash <(curl -fsSL <链接>)
+或先下载脚本再执行。
+无人值守请设置 NONINTERACTIVE=1 并传入全部参数。
+EOT
+  exit 1
+fi
+usage() {
+  cat <<'USAGE'
+用法：bash one-click.sh [选项]
+  --yes                     无人值守；所有必填项必须由参数或环境变量给出
+  --server IP_OR_HOST       公网地址
+  --port PORT               代理公网 TCP 端口
+  --listen-port PORT        代理内部 TCP 端口
+  --target HOST:PORT        REALITY 目标
+  --sni NAME                REALITY serverName
+  --sub-port PORT           订阅公网 TCP 端口
+  --sub-listen-port PORT    订阅内部 TCP 端口
+  --plan-total SIZE         月流量，例如 200GB 或 0
+  --plan-reset DAY          重置日 0-31
+  --plan-expire DATE        YYYY-MM-DD 或 0
+  --archive FILE            本地发布包（仍校验 SHA256）
+  --url URL                 自定义下载地址
+  --proxy URL               下载用 HTTP(S) 代理
+  --open-firewall           自动放行 ufw/firewalld 端口
+  --skip-smoke              跳过安装后的链路自检
+  -h, --help                显示本帮助
+USAGE
+}
+while (($#)); do
+  case "$1" in
+    --yes) NONINTERACTIVE=1;;
+    --server) SERVER_ADDRESS=$2; shift;;
+    --port) PUBLIC_PORT=$2; shift;;
+    --listen-port) LISTEN_PORT=$2; shift;;
+    --target) REALITY_DEST=$2; shift;;
+    --sni) REALITY_SERVER_NAME=$2; shift;;
+    --sub-port) SUB_PUBLIC_PORT=$2; shift;;
+    --sub-listen-port) SUB_LISTEN_PORT=$2; shift;;
+    --plan-total) PLAN_TOTAL=$2; shift;;
+    --plan-reset) PLAN_RESET_DAY=$2; shift;;
+    --plan-expire) PLAN_EXPIRE=$2; shift;;
+    --archive) XRAY_ARCHIVE=$2; shift;;
+    --url) XRAY_URL=$2; shift;;
+    --proxy) XRAY_PROXY=$2; shift;;
+    --open-firewall) OPEN_FIREWALL=1;;
+    --skip-smoke) SKIP_SMOKE=1;;
+    -h|--help) usage; exit 0;;
+    *) echo "未知参数：$1（用 --help 查看用法）" >&2; exit 1;;
+  esac
+  shift
+done
+# A target-only call derives the SNI, matching install-xray.sh --target.
+if [[ -n ${REALITY_DEST:-} && -z ${REALITY_SERVER_NAME:-} ]]; then
+  REALITY_SERVER_NAME=${REALITY_DEST%:*}
+fi
 saved=/usr/local/etc/xray/client.json
 # Existing values are defaults for the prompts. Interactive runs still show and
 # read every item; NONINTERACTIVE=1 is the only mode that may skip prompting.
@@ -82,6 +142,7 @@ ask PLAN_RESET_DAY '流量重置日（1-31，0=无固定重置日）' "${PLAN_RE
 ask PLAN_EXPIRE '套餐到期日（YYYY-MM-DD，0=长期有效）' "${PLAN_EXPIRE:-0}"
 export SERVER_ADDRESS PUBLIC_PORT LISTEN_PORT REALITY_DEST REALITY_SERVER_NAME SUB_PUBLIC_PORT SUB_LISTEN_PORT
 export PLAN_TOTAL PLAN_RESET_DAY PLAN_EXPIRE
+export XRAY_ARCHIVE XRAY_URL XRAY_PROXY OPEN_FIREWALL SKIP_SMOKE NONINTERACTIVE
 printf '\n代理 公网 %s:%s -> 内部 TCP %s\n订阅 公网 %s:%s -> 内部 TCP %s\n目标 %s\n' \
   "$SERVER_ADDRESS" "$PUBLIC_PORT" "$LISTEN_PORT" "$SERVER_ADDRESS" "$SUB_PUBLIC_PORT" "$SUB_LISTEN_PORT" "$REALITY_DEST"
 printf '套餐 月流量 %s / 重置日 %s / 到期 %s\n' "$PLAN_TOTAL" "$PLAN_RESET_DAY" "$PLAN_EXPIRE"
@@ -104,6 +165,16 @@ __RULES__
 XRAY_RULES_PAYLOAD
 bash "$work/install-xray.sh" --install
 bash /usr/local/sbin/xray-admin --export
+if [[ ${SKIP_SMOKE:-0} == 1 ]]; then
+  echo '已按 --skip-smoke / SKIP_SMOKE=1 跳过链路自检；请用 FlClash/Shadowrocket 实测。'
+elif [[ ${NONINTERACTIVE:-0} != 1 ]]; then
+  echo
+  echo '正在做链路自检（本机客户端 -> REALITY -> 目标站）…'
+  if ! bash "$work/install-xray.sh" --verify; then
+    echo '链路自检失败。请把上面的客户端日志/服务端日志发给我；确认要跳过可加 --skip-smoke。' >&2
+    exit 1
+  fi
+fi
 echo
 echo '安装完成。'
 echo '日常维护：xray-admin（含查看订阅地址、编辑规则）'

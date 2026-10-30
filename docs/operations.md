@@ -42,6 +42,43 @@ bash <(curl -fsSL https://raw.githubusercontent.com/MysticRichard/personal-xray-
 
 重装会保留已有 UUID、密钥和订阅 token，但仍应先备份。已有 `/etc/xray-sub/rules.yaml` 默认不会被覆盖；不会自动把线上规则换成 8,633 条模板。
 
+同一组参数也可以写成命令行参数（等价于上面的环境变量）：
+
+```bash
+bash <(curl -fsSL .../one-click.sh) --yes \
+  --server 203.0.113.10 --port 443 --listen-port 443 \
+  --target www.apple.com:443 --sni www.apple.com \
+  --sub-port 2096 --sub-listen-port 2096 \
+  --plan-total 200GB --plan-reset 0 --plan-expire 2026-11-23
+```
+
+`--archive <zip>`、`--url <地址>`、`--proxy <http代理>` 分别对应本地包、自定义下载地址和下载代理；仍强制 SHA256。
+
+## 环境预检、链路自检与卸载
+
+```bash
+# 只检查，不写入：时钟、防火墙、端口、磁盘、目标 TLS1.3/h2
+bash install-xray.sh --check
+
+# 装完后验证本机客户端 -> REALITY -> 目标站
+xray-installer --verify
+# 一键安装的交互模式会自动执行；失败时用 --skip-smoke 才能跳过
+
+# 卸载（保留 /etc/xray-sub 的 token/规则/套餐与 /root/xray-backups）
+xray-installer --uninstall
+xray-installer --uninstall --purge   # 连 /etc/xray-sub 一起删除
+```
+
+也可以从菜单 14 卸载。卸载只处理本机服务和配置，不会改云平台端口映射，也不删除手机/电脑上的客户端配置。
+
+预检发现时钟偏差超过 120 秒会直接失败，提示执行 `timedatectl set-ntp true`；这能避免把时钟问题误判成目标 TLS 故障。防火墙默认只报告，不改规则；确认要放行时加 `--open-firewall`：
+
+```bash
+bash install-xray.sh --check --open-firewall
+```
+
+只放行本机 ufw/firewalld；NAT/安全组仍需在平台侧放行。
+
 ## 套餐信息
 
 ```bash

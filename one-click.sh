@@ -3,7 +3,7 @@
 set -Eeuo pipefail
 set +x
 umask 077
-SCRIPT_VERSION=2026.10.30-review1
+SCRIPT_VERSION=2026.10.30-review2
 printf '个人 Xray 安装脚本 %s\n' "$SCRIPT_VERSION"
 [[ $EUID -eq 0 ]] || { echo '请使用 root 运行'; exit 1; }
 [[ -f /etc/debian_version && -d /run/systemd/system ]] || { echo '需要 Debian + systemd'; exit 1; }
@@ -21,6 +21,66 @@ fi
 for tool in curl openssl unzip jq ss free sha256sum timeout busybox nano; do
   command -v "$tool" >/dev/null || { echo "缺少依赖：$tool" >&2; exit 1; }
 done
+# `curl ... | bash` feeds the script body on stdin, so prompts would consume
+# code instead of answers. Require a terminal, or explicit unattended mode.
+if [[ ${NONINTERACTIVE:-0} != 1 && ! -t 0 ]]; then
+  cat >&2 <<'EOT'
+检测到标准输入不是终端（例如 curl ... | bash）。
+请改用：bash <(curl -fsSL <链接>)
+或先下载脚本再执行。
+无人值守请设置 NONINTERACTIVE=1 并传入全部参数。
+EOT
+  exit 1
+fi
+usage() {
+  cat <<'USAGE'
+用法：bash one-click.sh [选项]
+  --yes                     无人值守；所有必填项必须由参数或环境变量给出
+  --server IP_OR_HOST       公网地址
+  --port PORT               代理公网 TCP 端口
+  --listen-port PORT        代理内部 TCP 端口
+  --target HOST:PORT        REALITY 目标
+  --sni NAME                REALITY serverName
+  --sub-port PORT           订阅公网 TCP 端口
+  --sub-listen-port PORT    订阅内部 TCP 端口
+  --plan-total SIZE         月流量，例如 200GB 或 0
+  --plan-reset DAY          重置日 0-31
+  --plan-expire DATE        YYYY-MM-DD 或 0
+  --archive FILE            本地发布包（仍校验 SHA256）
+  --url URL                 自定义下载地址
+  --proxy URL               下载用 HTTP(S) 代理
+  --open-firewall           自动放行 ufw/firewalld 端口
+  --skip-smoke              跳过安装后的链路自检
+  -h, --help                显示本帮助
+USAGE
+}
+while (($#)); do
+  case "$1" in
+    --yes) NONINTERACTIVE=1;;
+    --server) SERVER_ADDRESS=$2; shift;;
+    --port) PUBLIC_PORT=$2; shift;;
+    --listen-port) LISTEN_PORT=$2; shift;;
+    --target) REALITY_DEST=$2; shift;;
+    --sni) REALITY_SERVER_NAME=$2; shift;;
+    --sub-port) SUB_PUBLIC_PORT=$2; shift;;
+    --sub-listen-port) SUB_LISTEN_PORT=$2; shift;;
+    --plan-total) PLAN_TOTAL=$2; shift;;
+    --plan-reset) PLAN_RESET_DAY=$2; shift;;
+    --plan-expire) PLAN_EXPIRE=$2; shift;;
+    --archive) XRAY_ARCHIVE=$2; shift;;
+    --url) XRAY_URL=$2; shift;;
+    --proxy) XRAY_PROXY=$2; shift;;
+    --open-firewall) OPEN_FIREWALL=1;;
+    --skip-smoke) SKIP_SMOKE=1;;
+    -h|--help) usage; exit 0;;
+    *) echo "未知参数：$1（用 --help 查看用法）" >&2; exit 1;;
+  esac
+  shift
+done
+# A target-only call derives the SNI, matching install-xray.sh --target.
+if [[ -n ${REALITY_DEST:-} && -z ${REALITY_SERVER_NAME:-} ]]; then
+  REALITY_SERVER_NAME=${REALITY_DEST%:*}
+fi
 saved=/usr/local/etc/xray/client.json
 # Existing values are defaults for the prompts. Interactive runs still show and
 # read every item; NONINTERACTIVE=1 is the only mode that may skip prompting.
@@ -74,6 +134,7 @@ ask PLAN_RESET_DAY '流量重置日（1-31，0=无固定重置日）' "${PLAN_RE
 ask PLAN_EXPIRE '套餐到期日（YYYY-MM-DD，0=长期有效）' "${PLAN_EXPIRE:-0}"
 export SERVER_ADDRESS PUBLIC_PORT LISTEN_PORT REALITY_DEST REALITY_SERVER_NAME SUB_PUBLIC_PORT SUB_LISTEN_PORT
 export PLAN_TOTAL PLAN_RESET_DAY PLAN_EXPIRE
+export XRAY_ARCHIVE XRAY_URL XRAY_PROXY OPEN_FIREWALL SKIP_SMOKE NONINTERACTIVE
 printf '\n代理 公网 %s:%s -> 内部 TCP %s\n订阅 公网 %s:%s -> 内部 TCP %s\n目标 %s\n' \
   "$SERVER_ADDRESS" "$PUBLIC_PORT" "$LISTEN_PORT" "$SERVER_ADDRESS" "$SUB_PUBLIC_PORT" "$SUB_LISTEN_PORT" "$REALITY_DEST"
 printf '套餐 月流量 %s / 重置日 %s / 到期 %s\n' "$PLAN_TOTAL" "$PLAN_RESET_DAY" "$PLAN_EXPIRE"
@@ -201,6 +262,65 @@ reject_private_target_address() {
   return 1
 }
 
+# A wrong clock breaks certificate validation and REALITY handshakes long
+# before any port check can explain it. Prefer NTP; fall back to the HTTP Date
+# header, which works even on images without systemd-timesyncd.
+check_clock() {
+  local ntp http_date now skew source
+  ntp=$(timedatectl show -p NTPSynchronized --value 2>/dev/null || true)
+  if [[ $ntp != yes ]]; then
+    timedatectl set-ntp true >/dev/null 2>&1 || true
+    sleep 1
+    ntp=$(timedatectl show -p NTPSynchronized --value 2>/dev/null || true)
+  fi
+  now=$(date -u +%s)
+  for source in "$REALITY_SERVER_NAME" www.cloudflare.com; do
+    http_date=$(timeout 10 curl -4 -sI --max-time 8 "https://$source/" 2>/dev/null \
+      | tr -d '\r' | sed -n 's/^[Dd][Aa][Tt][Ee]: *//p' | head -n1) || true
+    [[ -n $http_date ]] || continue
+    http_date=$(date -u -d "$http_date" +%s 2>/dev/null) || continue
+    skew=$(( now > http_date ? now - http_date : http_date - now ))
+    printf 'Clock: NTP=%s, skew=%ss (source %s)\n' "${ntp:-unknown}" "$skew" "$source"
+    (( skew <= ${CLOCK_SKEW_LIMIT:-120} )) && return 0
+    fail "System clock is off by ${skew}s; run 'timedatectl set-ntp true' and retry. TLS and REALITY both need a correct clock."
+  done
+  printf 'WARN: NTP=%s and no HTTP Date header was readable; TLS will fail if the clock is wrong.\n' "${ntp:-unknown}" >&2
+}
+
+# Report the host firewall instead of silently assuming the cloud NAT is the
+# only gate. Rules are only changed when OPEN_FIREWALL=1 is explicit.
+firewall_report() {
+  local sub_port=${SUB_PUBLIC_PORT:-$SUB_LISTEN_PORT} active=''
+  if command -v ufw >/dev/null 2>&1 && ufw status 2>/dev/null | grep -qi '^Status: active'; then
+    active=ufw
+  elif command -v firewall-cmd >/dev/null 2>&1 && firewall-cmd --state 2>/dev/null | grep -qx running; then
+    active=firewalld
+  fi
+  case $active in
+    ufw)
+      echo "Firewall: ufw active"
+      if [[ ${OPEN_FIREWALL:-0} == 1 ]]; then
+        ufw allow "$PUBLIC_PORT/tcp" >/dev/null || fail "ufw allow $PUBLIC_PORT/tcp failed."
+        ufw allow "$sub_port/tcp" >/dev/null || fail "ufw allow $sub_port/tcp failed."
+        echo "  opened TCP $PUBLIC_PORT and $sub_port"
+      else
+        echo "  allow before testing: ufw allow $PUBLIC_PORT/tcp; ufw allow $sub_port/tcp"
+      fi;;
+    firewalld)
+      echo "Firewall: firewalld active"
+      if [[ ${OPEN_FIREWALL:-0} == 1 ]]; then
+        firewall-cmd --permanent --add-port="$PUBLIC_PORT/tcp" >/dev/null || fail 'firewalld proxy rule failed.'
+        firewall-cmd --permanent --add-port="$sub_port/tcp" >/dev/null || fail 'firewalld subscription rule failed.'
+        firewall-cmd --reload >/dev/null || fail 'firewalld reload failed.'
+        echo "  opened TCP $PUBLIC_PORT and $sub_port"
+      else
+        echo "  allow before testing: firewall-cmd --permanent --add-port=$PUBLIC_PORT/tcp; firewall-cmd --permanent --add-port=$sub_port/tcp; firewall-cmd --reload"
+      fi;;
+    *)
+      echo 'Firewall: no active ufw/firewalld detected; the cloud security group/NAT rules still apply.';;
+  esac
+}
+
 validate_secrets() {
   [[ ${CLIENT_UUID:-} =~ ^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$ ]] || fail 'Invalid UUID.'
   [[ ${PRIVATE_KEY:-} =~ ^[A-Za-z0-9_-]{43}$ && ${PUBLIC_KEY:-} =~ ^[A-Za-z0-9_-]{43}$ ]] || fail 'Invalid X25519 key format.'
@@ -254,6 +374,8 @@ preflight() {
   for tool in curl openssl ss getent unzip jq sha256sum timeout free systemctl systemd-detect-virt; do command -v "$tool" >/dev/null || fail "Missing $tool; install dependencies listed in README."; done
   validate
   validate_plan
+  check_clock
+  firewall_report
   printf 'Plan: total=%s bytes, reset day=%s, expire=%s\n' "$PLAN_TOTAL_BYTES" "$PLAN_RESET_DAY" "${PLAN_EXPIRE_DATE:-0}"
   printf 'Public endpoint: %s:%s -> guest TCP port %s\n' "$SERVER_ADDRESS" "$PUBLIC_PORT" "$LISTEN_PORT"
   printf 'Subscription: public %s -> guest TCP port %s\n' "${SUB_PUBLIC_PORT:-$LISTEN_PORT}" "${SUB_LISTEN_PORT:-2096}"
@@ -456,6 +578,8 @@ INFO
 
 download_release() {
   local out=$1 release_path url best_url='' best_speed=0 probe code speed
+  local -a proxy=()
+  [[ -n ${XRAY_PROXY:-} ]] && proxy=(--proxy "$XRAY_PROXY")
   if [[ -n ${XRAY_ARCHIVE:-} ]]; then
     [[ -f $XRAY_ARCHIVE ]] || fail "XRAY_ARCHIVE not found: $XRAY_ARCHIVE"
     cp -- "$XRAY_ARCHIVE" "$out" || fail 'Could not copy XRAY_ARCHIVE.'
@@ -482,7 +606,7 @@ download_release() {
   # Probe a small range from each source and prefer the fastest. The SHA256
   # below is still the trust anchor; a mirror only changes the transfer path.
   for url in "${urls[@]}"; do
-    probe=$(curl -L --range 0-262143 --max-time 8 --connect-timeout 5 \
+    probe=$(curl "${proxy[@]}" -L --range 0-262143 --max-time 8 --connect-timeout 5 \
       -o /dev/null -w '%{http_code} %{speed_download}' "$url" 2>/dev/null) || continue
     code=${probe%% *}
     speed=${probe##* }
@@ -501,7 +625,7 @@ download_release() {
   done
   for url in "${tries[@]}"; do
     rm -f "$out"
-    if curl --fail --location --retry 3 --retry-delay 2 --retry-all-errors \
+    if curl "${proxy[@]}" --fail --location --retry 3 --retry-delay 2 --retry-all-errors \
       --continue-at - --connect-timeout 15 --max-time 600 \
       --speed-time 60 --speed-limit 1024 \
       "$url" -o "$out"; then
@@ -566,6 +690,7 @@ install_node() {  preflight
       systemctl stop xray-sub 2>/dev/null || true
       for pair in \
         "xrayetc:/usr/local/etc/xray" "binary:$BIN" "assets:$ASSETS" "unit:$UNIT" "admin:/usr/local/sbin/xray-admin" \
+        "installer:/usr/local/sbin/xray-installer" \
         "subetc:/etc/xray-sub" "subweb:/srv/sub" "subunit:/etc/systemd/system/xray-sub.service" \
         "subbin:/usr/local/sbin/xray-sub"; do
         restore "${pair%%:*}" "${pair#*:}"
@@ -585,6 +710,7 @@ install_node() {  preflight
   snapshot assets "$ASSETS"
   snapshot unit "$UNIT"
   snapshot admin /usr/local/sbin/xray-admin
+  snapshot installer /usr/local/sbin/xray-installer
   snapshot subetc /etc/xray-sub
   snapshot subweb /srv/sub
   snapshot subunit /etc/systemd/system/xray-sub.service
@@ -666,6 +792,9 @@ EOF
   install -m 600 "$stage/client.json" "$STATE"
   install -m 644 "$stage/xray.service" "$UNIT"
   install -m 700 "$SELF_DIR/xray-admin" /usr/local/sbin/xray-admin
+  # Keep the installer available after the one-click payload is deleted, so
+  # --verify and --uninstall still work without re-downloading anything.
+  install -m 700 "$SELF_DIR/install-xray.sh" /usr/local/sbin/xray-installer
   # Drop the extracted staging directory before activation to reduce temporary
   # disk/page-cache pressure on small hosts.
   rm -rf "$stage"
@@ -702,12 +831,167 @@ EOF
   echo "PASS: local service listening. Backup: $backup"
   echo 'Run xray-admin for status, logs and client export. Test the public endpoint before claiming connectivity.'
 }
-case ${1:---help} in
-  --render) [[ $# == 2 ]] || fail 'Usage: --render OUTPUT'; render "$2";;
-  --preflight) preflight;;
-  --install) install_node;;
-  *) echo 'Usage: install-xray.sh --preflight | --install | --render OUTPUT'
-     echo 'Set SERVER_ADDRESS, PUBLIC_PORT, LISTEN_PORT, REALITY_DEST, REALITY_SERVER_NAME.';;
+# Prove that the installed node actually proxies traffic: start a temporary
+# client from the exported state, dial the real listener over loopback, and
+# fetch a known URL through it. This catches UUID/flow/target mistakes that
+# "unit is active" cannot see.
+verify_proxy_path() {
+  local uuid listen_port sni public_key short_id socks_port tmp pid out ok=0 i code
+  [[ -f $STATE ]] || fail 'No installed node found; run --install first.'
+  [[ -x $BIN ]] || fail "$BIN is missing; run --install first."
+  for tool in jq ss curl shuf; do command -v "$tool" >/dev/null || fail "Missing $tool."; done
+  uuid=$(jq -er .uuid "$STATE") || fail 'State file has no uuid.'
+  listen_port=$(jq -er '.listen_port // .port' "$STATE") || fail 'State file has no port.'
+  sni=$(jq -er .server_name "$STATE") || fail 'State file has no server_name.'
+  public_key=$(jq -er .public_key "$STATE") || fail 'State file has no public_key.'
+  short_id=$(jq -er .short_id "$STATE") || fail 'State file has no short_id.'
+  socks_port=$(shuf -i 20000-40000 -n 1)
+  tmp=$(mktemp -d)
+  jq -n --arg uuid "$uuid" --argjson port "$listen_port" --arg sni "$sni" \
+    --arg pub "$public_key" --arg sid "$short_id" --argjson socks "$socks_port" '{
+      log: {loglevel: "warning"},
+      inbounds: [{tag: "socks", listen: "127.0.0.1", port: $socks,
+        protocol: "socks", settings: {udp: false}}],
+      outbounds: [{tag: "proxy", protocol: "vless",
+        settings: {vnext: [{address: "127.0.0.1", port: $port,
+          users: [{id: $uuid, encryption: "none", flow: "xtls-rprx-vision"}]}]},
+        streamSettings: {network: "tcp", security: "reality",
+          realitySettings: {serverName: $sni, fingerprint: "chrome",
+            publicKey: $pub, shortId: $sid, spiderX: "/"}}}]
+    }' > "$tmp/client.json"
+  XRAY_LOCATION_ASSET="$ASSETS" "$BIN" run -c "$tmp/client.json" >"$tmp/client.log" 2>&1 &
+  pid=$!
+  for ((i = 0; i < 20; i++)); do
+    ss -lntH "sport = :$socks_port" 2>/dev/null | grep -q . && break
+    kill -0 "$pid" 2>/dev/null || break
+    sleep 0.25
+  done
+  if ! ss -lntH "sport = :$socks_port" 2>/dev/null | grep -q .; then
+    tail -20 "$tmp/client.log" >&2 || true
+    kill "$pid" 2>/dev/null || true; wait "$pid" 2>/dev/null || true
+    rm -rf "$tmp"
+    fail "Temporary client did not listen on 127.0.0.1:$socks_port."
+  fi
+  if out=$(curl --socks5-hostname "127.0.0.1:$socks_port" -fsS --max-time 15 \
+      https://www.cloudflare.com/cdn-cgi/trace 2>/dev/null) && [[ $out == *ip=* ]]; then
+    ok=1
+  elif code=$(curl --socks5-hostname "127.0.0.1:$socks_port" -sS -o /dev/null -w '%{http_code}' \
+      --max-time 15 "https://$sni/" 2>/dev/null) && [[ $code =~ ^[1-5][0-9]{2}$ ]]; then
+    # Any HTTP status proves the tunnel reached the target; REALITY only needs
+    # TLS1.3/h2, not a 200 from the target's web server.
+    ok=1
+  fi
+  if ((ok)); then
+    echo 'PASS: proxy path verified (client -> REALITY -> target)'
+  else
+    echo '--- client log ---' >&2
+    tail -20 "$tmp/client.log" >&2 || true
+    echo '--- server journal ---' >&2
+    journalctl -u xray -n 20 --no-pager >&2 || true
+  fi
+  kill "$pid" 2>/dev/null || true
+  wait "$pid" 2>/dev/null || true
+  rm -rf "$tmp"
+  ((ok)) || fail 'Proxy path check failed. Fix the node; only skip with SKIP_SMOKE=1 if you accept an unverified state.'
+}
+
+uninstall_node() {
+  [[ $EUID -eq 0 ]] || fail 'Run as root.'
+  systemctl disable --now xray.service xray-sub.service >/dev/null 2>&1 || true
+  systemctl stop xray.service xray-sub.service >/dev/null 2>&1 || true
+  rm -f "$UNIT" /etc/systemd/system/xray-sub.service "$BIN" \
+    /usr/local/sbin/xray-admin /usr/local/sbin/xray-sub /usr/local/sbin/xray-installer
+  rm -rf "$ASSETS" /usr/local/etc/xray /srv/sub
+  systemctl daemon-reload >/dev/null 2>&1 || true
+  if [[ ${PURGE:-0} == 1 ]]; then
+    rm -rf /etc/xray-sub
+    echo 'Removed /etc/xray-sub (token, rules, plan) because --purge was set.'
+  else
+    echo 'Removed services, binary and config; kept /etc/xray-sub (token/rules/plan) and /root/xray-backups.'
+  fi
+  echo 'Delete the matching client profiles on your devices as well.'
+}
+
+usage() {
+  cat <<'USAGE'
+Usage: install-xray.sh ACTION [OPTIONS]
+
+Actions:
+  --check, --preflight      Validate environment, ports, clock, firewall and target TLS
+  --install, --reinstall    Install or update the node (existing keys are reused)
+  --verify                  Test the installed node end-to-end over loopback
+  --uninstall [--purge]     Remove services and config (backups are kept)
+  --render FILE             Render the server config to FILE
+
+Options:
+  --server IP_OR_HOST       Public address clients use
+  --port PORT               Public proxy TCP port
+  --listen-port PORT        Internal proxy TCP port
+  --target HOST:PORT        REALITY target
+  --sni NAME                REALITY serverName (defaults to the target host)
+  --sub-port PORT           Public subscription TCP port
+  --sub-listen-port PORT    Internal subscription TCP port (>=1024)
+  --plan-total SIZE         e.g. 200GB, 0 for unlimited
+  --plan-reset DAY          0-31
+  --plan-expire YYYY-MM-DD  or 0
+  --archive FILE            Local release zip (verified by SHA256)
+  --url URL                 Custom release URL
+  --proxy URL               HTTP(S) proxy used for the release download
+  --open-firewall           Add ufw/firewalld rules for the chosen ports
+  --skip-smoke              Record that the caller already skipped --verify
+  --yes                     Unattended mode; all required values must be set
+  -h, --help                Show this help
+
+The same names work as environment variables (SERVER_ADDRESS, PUBLIC_PORT, ...).
+USAGE
+}
+
+parse_args() {
+  ACTION=''
+  while (($#)); do
+    case "$1" in
+      --check|--preflight) ACTION=preflight;;
+      --install|--reinstall) ACTION=install;;
+      --verify) ACTION=verify;;
+      --uninstall) ACTION=uninstall;;
+      --purge) PURGE=1;;
+      --render) [[ -n ${2:-} ]] || fail 'Usage: --render OUTPUT'; ACTION=render; RENDER_OUT=$2; shift;;
+      --server) [[ -n ${2:-} ]] || fail '--server requires a value'; SERVER_ADDRESS=$2; shift;;
+      --port) [[ -n ${2:-} ]] || fail '--port requires a value'; PUBLIC_PORT=$2; shift;;
+      --listen-port) [[ -n ${2:-} ]] || fail '--listen-port requires a value'; LISTEN_PORT=$2; shift;;
+      --target) [[ -n ${2:-} ]] || fail '--target requires a value'; REALITY_DEST=$2; shift;;
+      --sni) [[ -n ${2:-} ]] || fail '--sni requires a value'; REALITY_SERVER_NAME=$2; shift;;
+      --sub-port) [[ -n ${2:-} ]] || fail '--sub-port requires a value'; SUB_PUBLIC_PORT=$2; shift;;
+      --sub-listen-port) [[ -n ${2:-} ]] || fail '--sub-listen-port requires a value'; SUB_LISTEN_PORT=$2; shift;;
+      --plan-total) [[ -n ${2:-} ]] || fail '--plan-total requires a value'; PLAN_TOTAL=$2; shift;;
+      --plan-reset) [[ -n ${2:-} ]] || fail '--plan-reset requires a value'; PLAN_RESET_DAY=$2; shift;;
+      --plan-expire) [[ -n ${2:-} ]] || fail '--plan-expire requires a value'; PLAN_EXPIRE=$2; shift;;
+      --archive) [[ -n ${2:-} ]] || fail '--archive requires a value'; XRAY_ARCHIVE=$2; shift;;
+      --url) [[ -n ${2:-} ]] || fail '--url requires a value'; XRAY_URL=$2; shift;;
+      --proxy) [[ -n ${2:-} ]] || fail '--proxy requires a value'; XRAY_PROXY=$2; shift;;
+      --open-firewall) OPEN_FIREWALL=1;;
+      --skip-smoke) SKIP_SMOKE=1;;
+      --yes) NONINTERACTIVE=1;;
+      -h|--help) usage; exit 0;;
+      *) fail "Unknown argument: $1 (try --help)";;
+    esac
+    shift
+  done
+  [[ -n $ACTION ]] || { usage; exit 0; }
+  if [[ -n ${REALITY_DEST:-} && -z ${REALITY_SERVER_NAME:-} ]]; then
+    REALITY_SERVER_NAME=${REALITY_DEST%:*}
+  fi
+  # Consumed by the one-click wrapper and child invocations.
+  export NONINTERACTIVE SKIP_SMOKE OPEN_FIREWALL PURGE
+}
+
+parse_args "$@"
+case $ACTION in
+  preflight) preflight;;
+  install) install_node;;
+  verify) verify_proxy_path;;
+  uninstall) uninstall_node;;
+  render) render "$RENDER_OUT";;
 esac
 XRAY_INSTALL_PAYLOAD
 cat > "$work/xray-admin" <<'XRAY_ADMIN_PAYLOAD'
@@ -898,10 +1182,29 @@ change_sub_port() {
   sub_url
 }
 
+# Keep the removal list in sync with install-xray.sh --uninstall.
+uninstall_node() {
+  local force=${1:-0} answer
+  if ((force == 0)); then
+    read -r -p '将停止并删除 Xray 服务与配置（保留 /etc/xray-sub 与备份）。输入 yes 继续: ' answer || return 1
+    [[ $answer == yes ]] || { echo '已取消'; return 1; }
+  fi
+  systemctl disable --now xray xray-sub >/dev/null 2>&1 || true
+  systemctl stop xray xray-sub >/dev/null 2>&1 || true
+  rm -f /etc/systemd/system/xray.service /etc/systemd/system/xray-sub.service \
+    /usr/local/bin/xray /usr/local/sbin/xray-admin /usr/local/sbin/xray-sub /usr/local/sbin/xray-installer
+  rm -rf /usr/local/etc/xray /usr/local/share/xray /srv/sub
+  systemctl daemon-reload >/dev/null 2>&1 || true
+  echo '已卸载服务与配置；/etc/xray-sub 与 /root/xray-backups 保留。'
+  echo '请同时删除各设备上的客户端配置。'
+}
+
 case ${1:-} in
   --export) export_node; exit;;
   --sub) show_sub; exit;;
   --plan) show_plan; exit;;
+  --uninstall) uninstall_node 0; exit;;
+  --uninstall-force) uninstall_node 1; exit;;
 esac
 
 while true; do
@@ -921,6 +1224,7 @@ while true; do
  11. 备份
   12. 导出客户端节点
   13. 套餐信息（月流量/重置日/到期日）
+  14. 卸载 Xray（保留订阅规则与备份）
   0. 退出
 MENU
   read -r -p '选择: ' option || exit 0
@@ -950,6 +1254,7 @@ MENU
     11) backup_all || echo '备份失败，请检查磁盘';;
     12) export_node || echo '导出失败';;
     13) show_plan || echo '未记录套餐信息（可在下次一键部署时填写）';;
+    14) uninstall_node 0 || true;;
     0) exit 0;;
     *) echo '无效选项';;
   esac
@@ -9847,6 +10152,16 @@ cat > "$work/rules.template.yaml" <<'XRAY_RULES_PAYLOAD'
 XRAY_RULES_PAYLOAD
 bash "$work/install-xray.sh" --install
 bash /usr/local/sbin/xray-admin --export
+if [[ ${SKIP_SMOKE:-0} == 1 ]]; then
+  echo '已按 --skip-smoke / SKIP_SMOKE=1 跳过链路自检；请用 FlClash/Shadowrocket 实测。'
+elif [[ ${NONINTERACTIVE:-0} != 1 ]]; then
+  echo
+  echo '正在做链路自检（本机客户端 -> REALITY -> 目标站）…'
+  if ! bash "$work/install-xray.sh" --verify; then
+    echo '链路自检失败。请把上面的客户端日志/服务端日志发给我；确认要跳过可加 --skip-smoke。' >&2
+    exit 1
+  fi
+fi
 echo
 echo '安装完成。'
 echo '日常维护：xray-admin（含查看订阅地址、编辑规则）'

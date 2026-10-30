@@ -185,10 +185,29 @@ change_sub_port() {
   sub_url
 }
 
+# Keep the removal list in sync with install-xray.sh --uninstall.
+uninstall_node() {
+  local force=${1:-0} answer
+  if ((force == 0)); then
+    read -r -p '将停止并删除 Xray 服务与配置（保留 /etc/xray-sub 与备份）。输入 yes 继续: ' answer || return 1
+    [[ $answer == yes ]] || { echo '已取消'; return 1; }
+  fi
+  systemctl disable --now xray xray-sub >/dev/null 2>&1 || true
+  systemctl stop xray xray-sub >/dev/null 2>&1 || true
+  rm -f /etc/systemd/system/xray.service /etc/systemd/system/xray-sub.service \
+    /usr/local/bin/xray /usr/local/sbin/xray-admin /usr/local/sbin/xray-sub /usr/local/sbin/xray-installer
+  rm -rf /usr/local/etc/xray /usr/local/share/xray /srv/sub
+  systemctl daemon-reload >/dev/null 2>&1 || true
+  echo '已卸载服务与配置；/etc/xray-sub 与 /root/xray-backups 保留。'
+  echo '请同时删除各设备上的客户端配置。'
+}
+
 case ${1:-} in
   --export) export_node; exit;;
   --sub) show_sub; exit;;
   --plan) show_plan; exit;;
+  --uninstall) uninstall_node 0; exit;;
+  --uninstall-force) uninstall_node 1; exit;;
 esac
 
 while true; do
@@ -208,6 +227,7 @@ while true; do
  11. 备份
   12. 导出客户端节点
   13. 套餐信息（月流量/重置日/到期日）
+  14. 卸载 Xray（保留订阅规则与备份）
   0. 退出
 MENU
   read -r -p '选择: ' option || exit 0
@@ -237,6 +257,7 @@ MENU
     11) backup_all || echo '备份失败，请检查磁盘';;
     12) export_node || echo '导出失败';;
     13) show_plan || echo '未记录套餐信息（可在下次一键部署时填写）';;
+    14) uninstall_node 0 || true;;
     0) exit 0;;
     *) echo '无效选项';;
   esac

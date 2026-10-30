@@ -53,10 +53,44 @@ xray-admin
 11. 备份
   12. 导出客户端节点
   13. 套餐信息（月流量/重置日/到期日）
+  14. 卸载 Xray（保留订阅规则与备份）
 0. 退出
 ```
 
 常用命令、重启、日志、订阅自检和备份说明见 [`docs/operations.md`](docs/operations.md)。
+
+## 非交互安装与自检
+
+十项参数都可以用同名环境变量或命令行参数给出，适合重装和排障：
+
+```bash
+bash <(curl -fsSL https://raw.githubusercontent.com/MysticRichard/personal-xray-deploy/main/one-click.sh) \
+  --yes \
+  --server 203.0.113.10 \
+  --port 443 --listen-port 443 \
+  --target www.apple.com:443 \
+  --sub-port 2096 --sub-listen-port 2096 \
+  --plan-total 200GB --plan-reset 0 --plan-expire 2026-11-23
+```
+
+交互安装结束后会做一次**链路自检**：临时启动本机客户端，经 REALITY 访问目标站，确认 UUID、flow、目标和端口都真的能出网。失败会打印客户端与服务端日志；确定要跳过时加 `--skip-smoke`。
+
+其他动作：
+
+```bash
+# 只做环境预检（时间、防火墙、端口、目标 TLS）
+bash install-xray.sh --check --server ... --target ... ...
+
+# 重新检查已安装节点（安装器也会装到 /usr/local/sbin/xray-installer）
+xray-installer --verify
+
+# 卸载（保留 /etc/xray-sub 与 /root/xray-backups）
+xray-installer --uninstall
+# 连订阅 token、规则和套餐记录一起删除
+xray-installer --uninstall --purge
+```
+
+防火墙默认只报告、不修改；确认要自动放行时加 `--open-firewall`（支持 ufw/firewalld）。云平台安全组仍需自行放行。
 
 ## 规则怎么改
 
@@ -86,7 +120,8 @@ xray-admin
 ## 需要提前知道
 
 - 仅支持 **Debian amd64 + systemd**。
-- 不修改端口映射、防火墙、APT 源或内核参数。
+- 默认不修改端口映射、防火墙、APT 源或内核参数；`--open-firewall` 会在明确要求时放行本机 ufw/firewalld 端口，云安全组仍需手动处理。
+- 预检会检查时钟偏差（NTP 或 HTTP Date 头）；时钟错误会直接停止安装，避免误报为 TLS 故障。
 - 订阅和代理都需要在云平台做好端口转发。
 - 配置能降低被动识别概率，但不保证 IP 永不被封。
 - 128 MB 是下限，已针对性做内存优化，但仍建议条件允许时升级。
@@ -123,6 +158,9 @@ bash tests/test-plan-validation.sh        # 100GB/1TB/日期/重置日格式
 bash tests/test-entrypoint-prompts.sh     # 十项交互、套餐示例与默认值
 bash tests/test-public-bundle.sh          # 无实例参数或凭据泄露
 bash tests/test-preflight-http.sh         # 预检策略回归
+bash tests/test-clock-guard.sh            # 时钟偏差阻止安装
+bash tests/test-firewall-report.sh        # 防火墙只报告、按需放行
+bash tests/test-cli-args.sh               # 参数解析与 --verify 拒绝空状态
 ```
 
 完整回归和真实 systemd 安装测试需要 review 容器，命令见 [`tests/README.md`](tests/README.md)。Windows 侧生成器测试：

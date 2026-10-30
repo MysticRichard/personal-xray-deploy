@@ -11,6 +11,9 @@ fi
 bash "$root/tests/test-validation-behaviour.sh"
 bash "$root/tests/test-plan-validation.sh"
 bash "$root/tests/test-preflight-http.sh"
+bash "$root/tests/test-clock-guard.sh"
+bash "$root/tests/test-firewall-report.sh"
+bash "$root/tests/test-cli-args.sh"
 bash "$root/tests/test-bind-address.sh"
 bash "$root/tests/test-sub-unit.sh"
 bash "$root/tests/test-sub-review.sh"
@@ -23,6 +26,7 @@ if [[ -d /run/systemd/system && $(tr -d '\n' </proc/1/comm 2>/dev/null) == syste
 else
   echo 'SKIP: real-systemd test needs the xray-review-systemd container (docker exec ...)'
 fi
+DISPOSABLE_XRAY_TEST=1 bash "$root/tests/test-uninstall.sh"
 # The failure check intentionally gets a nonzero status and verifies it.
 rc=0
 bash "$0" --failure-self-test >/dev/null 2>&1 || rc=$?
