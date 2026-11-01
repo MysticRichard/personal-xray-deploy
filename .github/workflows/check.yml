@@ -13,6 +13,7 @@ jobs:
           bash -n one-click.sh
           bash -n install-xray.sh
           bash -n xray-admin
+          bash -n alpine/one-click-alpine.sh
           bash tests/test-preflight-http.sh
           bash tests/test-server.sh
   profile:
