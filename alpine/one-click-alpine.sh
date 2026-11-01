@@ -21,7 +21,7 @@
 set -Eeuo pipefail
 umask 077
 
-SCRIPT_VERSION="2026.11.01-alpine8"
+SCRIPT_VERSION="2026.11.01-alpine9"
 HAVE_SUPERVISOR=0
 
 # 与 Debian 版一致的、已随 FlClash/mihomo 验证过的版本组合
@@ -63,6 +63,22 @@ in_container() {
 
 mkd()  { mkdir -p -- "$1" && chmod "$2" -- "$1"; }  # busybox 没有 install(1) 的完整语义
 putf() { mkdir -p -- "$(dirname -- "$2")"; cp -f -- "$1" "$2"; chmod "$3" -- "$2"; }
+
+# 订阅服务要一个 httpd。Alpine 3.24 的主 busybox 不保证带 httpd applet，
+# 带 httpd 的是 busybox-extras（注意 /usr/sbin/httpd 现在属于 apache2）。
+HTTPD_BIN=/bin/busybox
+detect_httpd() {
+  # --list 有的实现一行一个，有的空格分隔，统一拆成行再比对
+  if busybox --list 2>/dev/null | tr ' ' '\n' | grep -qx httpd; then
+    HTTPD_BIN=/bin/busybox
+    return 0
+  fi
+  if [[ -x /bin/busybox-extras ]] && /bin/busybox-extras --list 2>/dev/null | tr ' ' '\n' | grep -qx httpd; then
+    HTTPD_BIN=/bin/busybox-extras
+    return 0
+  fi
+  return 1
+}
 
 svc_pidfile() { printf '/run/%s.pid' "$1"; }
 
@@ -449,6 +465,22 @@ install_deps() {
   for pkg in curl openssl unzip jq sha256sum timeout getent ss; do
     command -v "$pkg" >/dev/null 2>&1 || die "缺少命令：$pkg"
   done
+
+  # 订阅服务需要 httpd：主 busybox 可能没有这个 applet，补装 busybox-extras
+  if ! detect_httpd; then
+    step '主 busybox 没有 httpd applet，安装 busybox-extras'
+    if timeout 300 apk add --no-cache --no-progress busybox-extras \
+         </dev/null >"$apklog.bx" 2>&1; then
+      :
+    else
+      printf '\n--- apk 输出末 20 行 ---\n' >&2
+      tail -n 20 "$apklog.bx" >&2 2>/dev/null || true
+      warn 'busybox-extras 安装失败'
+    fi
+    detect_httpd || die '找不到可用的 httpd（busybox 缺 httpd applet，busybox-extras 也装不上）。节点本身不受影响：装完后可用 xray-admin 菜单 10 导出节点 JSON 手工导入'
+  fi
+  info "httpd：$HTTPD_BIN httpd"
+
   if command -v supervise-daemon >/dev/null 2>&1; then
     HAVE_SUPERVISOR=1
   else
@@ -635,7 +667,7 @@ RUN
 
   cat > /usr/local/sbin/xray-sub-run.sh <<RUN
 #!/bin/sh
-exec /bin/busybox httpd -f -p 0.0.0.0:${sub_port} -h /srv/sub >> /var/log/xray/xray-sub.log 2>&1
+exec ${HTTPD_BIN} httpd -f -p 0.0.0.0:${sub_port} -h /srv/sub >> /var/log/xray/xray-sub.log 2>&1
 RUN
   chmod 755 /usr/local/sbin/xray-sub-run.sh
 
@@ -932,7 +964,7 @@ setup_subscription() {
   enable_service xray-sub
 
   svc_stop xray-sub
-  pkill -f 'busybox httpd' >/dev/null 2>&1 || true
+  pkill -f 'httpd -f -p 0.0.0.0' >/dev/null 2>&1 || true
   sleep 1
 
   local sub_ok=0 i sub_url="http://127.0.0.1:${sub_port}/cgi-bin/${token}"
@@ -947,7 +979,7 @@ setup_subscription() {
   if ((!sub_ok)); then
     warn 'supervise-daemon 没能把订阅服务拉起来，改用 su-exec 直启'
     svc_stop xray-sub
-    pkill -f 'busybox httpd' >/dev/null 2>&1 || true
+    pkill -f 'httpd -f -p 0.0.0.0' >/dev/null 2>&1 || true
     sleep 1
     svc_fallback xray-sub >/dev/null 2>&1 || true
     wait_http "$sub_url" 8 && sub_ok=1
