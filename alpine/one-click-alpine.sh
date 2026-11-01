@@ -21,7 +21,7 @@
 set -Eeuo pipefail
 umask 077
 
-SCRIPT_VERSION="2026.11.01-alpine3"
+SCRIPT_VERSION="2026.11.01-alpine4"
 HAVE_SUPERVISOR=0
 
 # 与 Debian 版一致的、已随 FlClash/mihomo 验证过的版本组合
@@ -66,12 +66,60 @@ putf() { mkdir -p -- "$(dirname -- "$2")"; cp -f -- "$1" "$2"; chmod "$3" -- "$2
 
 svc_pidfile() { printf '/run/%s.pid' "$1"; }
 
+# 僵尸进程也占着 /proc，只看 kill -0 会把"已经崩了"当成"还在跑"
+proc_alive() {
+  local pid="$1" state
+  [[ -n $pid && -d /proc/$pid ]] || return 1
+  state=$(sed 's/^.*) //' "/proc/$pid/stat" 2>/dev/null | awk '{print $1}')
+  [[ $state == Z ]] && return 1
+  kill -0 "$pid" 2>/dev/null
+}
+
 svc_running() {
   local pf pid
   pf=$(svc_pidfile "$1")
   [[ -s $pf ]] || return 1
   pid=$(tr -d ' \r\n' < "$pf")
-  [[ -n $pid ]] && kill -0 "$pid" 2>/dev/null
+  proc_alive "$pid"
+}
+
+# 判定端口是不是真的在监听：直接连一下，比匹配 ss 的输出可靠
+# （ss 的过滤语法、IPv4/IPv6 差异、不同实现的输出格式都可能造成假阴性）
+wait_listen() {  # wait_listen <port> [最多等几秒]
+  local port="$1" limit="${2:-15}" i
+  for ((i = 0; i < limit; i++)); do
+    if (exec 3<>"/dev/tcp/127.0.0.1/$port") 2>/dev/null; then
+      return 0
+    fi
+    sleep 1
+  done
+  return 1
+}
+
+diag_listen() {  # diag_listen <port>
+  local port="$1" pf pid
+  pf=$(svc_pidfile xray)
+
+  printf '\n--- 诊断：%s ---\n' "$pf" >&2
+  if [[ -s $pf ]]; then
+    pid=$(tr -d ' \r\n' < "$pf")
+    printf 'pid=%s 存活=%s\n' "$pid" "$(proc_alive "$pid" && echo yes || echo no)" >&2
+    [[ -r /proc/$pid/cmdline ]] && printf 'cmd=%s\n' "$(tr '\0' ' ' < "/proc/$pid/cmdline")" >&2
+  else
+    printf '(不存在或为空)\n' >&2
+  fi
+
+  printf '\n--- 诊断：当前监听的 TCP 端口 ---\n' >&2
+  ss -lnt 2>/dev/null >&2 || netstat -lnt 2>/dev/null >&2 || printf '(ss/netstat 都不可用)\n' >&2
+
+  printf '\n--- 诊断：占用 %s 的进程 ---\n' "$port" >&2
+  ss -lntp 2>/dev/null | awk -v p=":$port" 'NR == 1 || $4 ~ p' >&2 || true
+
+  printf '\n--- 诊断：配置文件里的 port ---\n' >&2
+  grep -m1 '"port"' "$CONFIG" >&2 2>/dev/null || true
+
+  printf '\n--- 诊断：日志末尾 ---\n' >&2
+  tail -n 30 "$LOG_DIR/xray.log" 2>/dev/null >&2 || printf '(没有日志)\n' >&2
 }
 
 svc_start() {
@@ -848,8 +896,18 @@ setup_subscription() {
     die '订阅服务未能启动'
   }
 
-  curl -fsS --max-time 5 "http://127.0.0.1:${sub_port}/cgi-bin/${token}" -o /dev/null \
-    || die '订阅本地自检失败'
+  local sub_ok=0 i
+  for i in 1 2 3 4 5; do
+    if curl -fsS --max-time 5 "http://127.0.0.1:${sub_port}/cgi-bin/${token}" -o /dev/null 2>/dev/null; then
+      sub_ok=1; break
+    fi
+    sleep 1
+  done
+  if ((!sub_ok)); then
+    tail -n 20 "$LOG_DIR/xray-sub.log" >&2 2>/dev/null || true
+    ss -lntp 2>/dev/null | awk -v p=":$sub_port" 'NR == 1 || $4 ~ p' >&2 || true
+    die "订阅本地自检失败（127.0.0.1:$sub_port 上没有响应）"
+  fi
 
   printf '\n%s\n' '============================================================'
   printf '%s\n' ' 订阅地址（粘到 FlClash 的订阅栏）：'
@@ -1226,8 +1284,11 @@ do_install() {
   done
   ((ok)) || { tail -n 20 "$LOG_DIR/xray.log" >&2 2>/dev/null || true; die 'Xray 未能启动'; }
 
-  ss -lntH "sport = :$LISTEN_PORT" 2>/dev/null | grep -q . \
-    || die '进程在跑但端口没有监听，检查端口冲突'
+  if ! wait_listen "$LISTEN_PORT" 15; then
+    diag_listen "$LISTEN_PORT"
+    die "进程在跑，但 127.0.0.1:$LISTEN_PORT 连不上（端口没监听或被别的程序占了）"
+  fi
+  info "已在 127.0.0.1:$LISTEN_PORT 监听"
 
   step "7/7 配置订阅"
   setup_subscription
