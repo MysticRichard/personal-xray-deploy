@@ -21,7 +21,7 @@
 set -Eeuo pipefail
 umask 077
 
-SCRIPT_VERSION="2026.11.01-alpine1"
+SCRIPT_VERSION="2026.11.01-alpine2"
 HAVE_SUPERVISOR=0
 
 # 与 Debian 版一致的、已随 FlClash/mihomo 验证过的版本组合
@@ -377,6 +377,36 @@ install_deps() {
 # ---------------------------------------------------------------------------
 # 下载 Xray
 # ---------------------------------------------------------------------------
+# busybox 的 sha256sum 只有 -c，没有 --check/--status；
+# 用它做 `sha256sum --check` 会直接失败，看起来就像"校验和不匹配"。
+archive_sha256() {
+  local f="$1" h
+  h=$(sha256sum -- "$f" 2>/dev/null | awk 'NR==1 {print tolower($1)}') || return 1
+  [[ -n $h ]] || return 1
+  printf '%s\n' "$h"
+}
+
+verify_archive() {  # verify_archive <文件> <来源描述>
+  local f="$1" label="${2:-下载文件}" got
+  [[ -s $f ]] || { warn "$label 是空文件"; return 1; }
+
+  # 镜像挂掉或被人插一层 HTML 错误页时，文件不是 zip，先挡掉
+  if [[ $(head -c 2 -- "$f" 2>/dev/null) != PK ]]; then
+    warn "$label 不是 zip（开头不是 PK），大概率是错误页或缓存劫持"
+    return 1
+  fi
+
+  got=$(archive_sha256 "$f") || { warn "$label 无法计算 sha256"; return 1; }
+  if [[ $got == "$XRAY_SHA256" ]]; then
+    info "校验和通过 ${got:0:16}…"
+    return 0
+  fi
+  warn "$label 校验和不匹配"
+  warn "  期望 $XRAY_SHA256"
+  warn "  实际 $got"
+  return 1
+}
+
 download_release() {
   local out="$1"
   local release_path="XTLS/Xray-core/releases/download/$XRAY_VERSION/Xray-linux-64.zip"
@@ -394,7 +424,10 @@ download_release() {
 
   if [[ -n ${XRAY_ARCHIVE:-} ]]; then
     [[ -f $XRAY_ARCHIVE ]] || die "XRAY_ARCHIVE 不存在：$XRAY_ARCHIVE"
-    cp -f -- "$XRAY_ARCHIVE" "$out"
+    cp -f -- "$XRAY_ARCHIVE" "$out" || die "复制 $XRAY_ARCHIVE 失败"
+    verify_archive "$out" "本地包 $XRAY_ARCHIVE" \
+      || die 'XRAY_ARCHIVE 校验和不匹配，已中止（防止被投毒）'
+    return 0
   else
     local best_url="" best_speed=0 url probe code speed
     for url in "${urls[@]}"; do
@@ -418,18 +451,17 @@ download_release() {
     local ok=0
     for url in "${tries[@]}"; do
       rm -f "$out"
-      if curl -fsSL --retry 3 --retry-delay 2 --retry-all-errors \
-           --connect-timeout 15 --max-time 600 --speed-time 60 --speed-limit 1024 \
-           "$url" -o "$out"; then
-        ok=1; break
+      if ! curl -fsSL --retry 3 --retry-delay 2 --retry-all-errors \
+             --connect-timeout 15 --max-time 600 --speed-time 60 --speed-limit 1024 \
+             "$url" -o "$out"; then
+        warn "下载失败：$url"
+        continue
       fi
-      warn "下载失败：$url"
+      verify_archive "$out" "$url" && { ok=1; break; }
+      warn "换下一个源重试"
     done
-    ((ok)) || die 'Xray 下载失败；可设置 XRAY_ARCHIVE=/path/to.zip 离线安装'
+    ((ok)) || die '所有下载源都失败或校验和不匹配；可设置 XRAY_ARCHIVE=/path/to.zip 离线安装'
   fi
-
-  printf '%s  %s\n' "$XRAY_SHA256" "$out" | sha256sum --check --status 2>/dev/null \
-    || die "Xray 包校验和不匹配，已中止（防止被投毒）"
 }
 
 # ---------------------------------------------------------------------------
@@ -1091,7 +1123,10 @@ do_install() {
   preflight
 
   local stage backup
-  stage=$(mktemp -d /tmp/xray-stage.XXXXXX)
+  # Alpine 的 /tmp 是 tmpfs（吃内存）：21MB 包 + 37MB 解压 ≈ 58MB，128MB 机器会 OOM
+  mkd /var/tmp 1777 2>/dev/null || true
+  stage=$(mktemp -d /var/tmp/xray-stage.XXXXXX 2>/dev/null) \
+    || stage=$(mktemp -d /tmp/xray-stage.XXXXXX)
   backup="/root/xray-backups/$(date -u +%Y%m%dT%H%M%SZ)-$$"
   mkd /root/xray-backups 700
   mkdir -p "$backup"

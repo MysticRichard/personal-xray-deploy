@@ -121,6 +121,8 @@ FlClash 里下拉刷新即可。
 |---|---|
 | `apk add` 失败 | `cat /etc/apk/repositories`，换国内源 `sed -i 's#dl-cdn.alpinelinux.org#mirrors.aliyun.com#' /etc/apk/repositories` |
 | 下载 Xray 失败 | 脚本已内置 4 个 GitHub 镜像自动测速；仍失败就设 `XRAY_ARCHIVE=/root/Xray-linux-64.zip` |
+| `Xray 包校验和不匹配` | 脚本会逐个换源重试并打印期望/实际 SHA256。全部源都不对时，用一个可信的 `Xray-linux-64.zip` 走 `XRAY_ARCHIVE=` 离线装 |
+| 安装到一半被 OOM kill | `/tmp` 在 Alpine 上是 tmpfs；脚本已把暂存目录放到 `/var/tmp`（磁盘）。仍不够就加 swap |
 | 启动失败 | `tail -50 /var/log/xray/xray.log`；`df -h /` 看是不是磁盘满了 |
 | 进程在跑但客户端连不上 | 先 `verify`；再确认平台安全组放行了公网端口 → 实例端口 |
 | 订阅 404 | 令牌换了：重跑 `xray-admin` 菜单 4 看新地址 |
