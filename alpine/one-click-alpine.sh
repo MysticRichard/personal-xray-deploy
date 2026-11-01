@@ -21,7 +21,7 @@
 set -Eeuo pipefail
 umask 077
 
-SCRIPT_VERSION="2026.11.01-alpine7"
+SCRIPT_VERSION="2026.11.01-alpine8"
 HAVE_SUPERVISOR=0
 
 # 与 Debian 版一致的、已随 FlClash/mihomo 验证过的版本组合
@@ -132,8 +132,9 @@ diag_listen() {  # diag_listen <port>
   printf '\n--- 诊断：配置文件里的 port ---\n' >&2
   { grep -m1 '"port"' "$CONFIG" 2>/dev/null; } >&2 || true
 
-  printf '\n--- 诊断：权限 ---\n' >&2
-  { ls -ld /usr/local/etc/xray "$CONFIG" 2>/dev/null; } >&2 || true
+  printf '\n--- 诊断：权限链 ---\n' >&2
+  { ls -ld /usr/local /usr/local/etc /usr/local/etc/xray "$CONFIG" 2>/dev/null; } >&2 || true
+  { id xray 2>/dev/null; } >&2 || true
 
   printf '\n--- 诊断：日志文件 ---\n' >&2
   { ls -l "$LOG_DIR/xray.log" 2>/dev/null; } >&2 || printf '(日志文件不存在)\n' >&2
@@ -607,8 +608,13 @@ JSON
 ensure_user() {  # ensure_user <name>
   local u="$1"
   getent group "$u" >/dev/null 2>&1 || addgroup -S "$u" || die "创建组 $u 失败"
-  id "$u" >/dev/null 2>&1 || adduser -S -D -H -h /nonexistent -s /sbin/nologin -G "$u" "$u" \
-    || die "创建用户 $u 失败"
+  if ! id "$u" >/dev/null 2>&1; then
+    adduser -S -D -H -h /nonexistent -s /sbin/nologin -G "$u" "$u" \
+      || die "创建用户 $u 失败"
+  elif ! id -Gn "$u" 2>/dev/null | tr ' ' '\n' | grep -qx "$u"; then
+    # 用户已存在（可能来自镜像）但不在同名组里，补上，否则 750 的目录进不去
+    addgroup "$u" "$u" >/dev/null 2>&1 || true
+  fi
   [[ $(id -u "$u") -ne 0 ]] || die "$u 不能是 root"
 }
 
@@ -1327,6 +1333,15 @@ do_install() {
   step "5/7 安装文件"
   ensure_user xray
   ensure_user xray-sub
+
+  # umask 077 下 mkdir -p 会把中间目录建成 700 root:root，
+  # 于是 xray 用户进不了 /usr/local/etc —— 路径上每一级都得放开
+  local d
+  for d in /usr/local /usr/local/etc /usr/local/share /usr/local/sbin /var/log /srv; do
+    [[ -d $d ]] || mkdir -p "$d"
+    chmod 755 "$d" 2>/dev/null || true
+  done
+
   mkd /usr/local/etc/xray 750
   # 关键：目录必须让 xray 组可进入，否则 xray 用户连 config.json 都打不开
   # （只给文件 640 是不够的，缺了目录的 x 位就是 permission denied）
@@ -1341,8 +1356,12 @@ do_install() {
 
   # 用真实身份试读一次，权限不对当场就失败，而不是等到启动才报错
   if command -v su-exec >/dev/null 2>&1; then
-    su-exec xray test -r "$CONFIG" 2>/dev/null \
-      || die "xray 用户读不到 $CONFIG（检查 /usr/local/etc/xray 的属组与权限）"
+    if ! su-exec xray test -r "$CONFIG" 2>/dev/null; then
+      printf '\n--- 权限链（每一级都要有 x 位）---\n' >&2
+      ls -ld /usr/local /usr/local/etc /usr/local/etc/xray "$CONFIG" >&2 2>/dev/null || true
+      printf 'xray 用户的组：%s\n' "$(id xray 2>/dev/null | tr ' ' '\n' | grep -i '^groups=' || id xray 2>/dev/null)" >&2
+      die "xray 用户读不到 $CONFIG（上面哪一级缺 x 位就改哪一级）"
+    fi
   fi
 
   jq -n --arg uuid "$CLIENT_UUID" --arg private_key "$PRIVATE_KEY" \
