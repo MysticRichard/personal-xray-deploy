@@ -21,7 +21,7 @@
 set -Eeuo pipefail
 umask 077
 
-SCRIPT_VERSION="2026.11.01-alpine5"
+SCRIPT_VERSION="2026.11.01-alpine6"
 HAVE_SUPERVISOR=0
 
 # 与 Debian 版一致的、已随 FlClash/mihomo 验证过的版本组合
@@ -96,6 +96,15 @@ wait_listen() {  # wait_listen <port> [最多等几秒]
   return 1
 }
 
+wait_http() {  # wait_http <url> [最多试几次]
+  local url="$1" limit="${2:-5}" i
+  for ((i = 0; i < limit; i++)); do
+    curl -fsS --max-time 5 -o /dev/null "$url" 2>/dev/null && return 0
+    sleep 1
+  done
+  return 1
+}
+
 diag_listen() {  # diag_listen <port>
   local port="$1" pf pid
   pf=$(svc_pidfile xray)
@@ -109,17 +118,28 @@ diag_listen() {  # diag_listen <port>
     printf '(不存在或为空)\n' >&2
   fi
 
+  # 注意重定向顺序：必须先把 stdout 指到 stderr，再把 stderr 丢掉；
+  # 写成 2>/dev/null >&2 会把 stdout 也一起丢进 /dev/null。
+  printf '\n--- 诊断：xray 相关进程 ---\n' >&2
+  ps w 2>/dev/null | awk 'NR == 1 || /[x]ray/' >&2 || true
+
   printf '\n--- 诊断：当前监听的 TCP 端口 ---\n' >&2
-  ss -lnt 2>/dev/null >&2 || netstat -lnt 2>/dev/null >&2 || printf '(ss/netstat 都不可用)\n' >&2
+  { ss -lnt 2>/dev/null || netstat -lnt 2>/dev/null; } >&2 || printf '(ss/netstat 都不可用)\n' >&2
 
   printf '\n--- 诊断：占用 %s 的进程 ---\n' "$port" >&2
-  ss -lntp 2>/dev/null | awk -v p=":$port" 'NR == 1 || $4 ~ p' >&2 || true
+  { ss -lntp 2>/dev/null | awk -v p=":$port" 'NR == 1 || $4 ~ p'; } >&2 || true
 
   printf '\n--- 诊断：配置文件里的 port ---\n' >&2
-  grep -m1 '"port"' "$CONFIG" >&2 2>/dev/null || true
+  { grep -m1 '"port"' "$CONFIG" 2>/dev/null; } >&2 || true
+
+  printf '\n--- 诊断：日志文件 ---\n' >&2
+  { ls -l "$LOG_DIR/xray.log" 2>/dev/null; } >&2 || printf '(日志文件不存在)\n' >&2
 
   printf '\n--- 诊断：日志末尾 ---\n' >&2
-  tail -n 30 "$LOG_DIR/xray.log" 2>/dev/null >&2 || printf '(没有日志)\n' >&2
+  { tail -n 30 "$LOG_DIR/xray.log" 2>/dev/null; } >&2 || true
+
+  printf '\n--- 诊断：前台直接跑一次（看真实报错）---\n' >&2
+  { XRAY_LOCATION_ASSET="$ASSETS" timeout 5 "$BIN" run -config "$CONFIG"; } >&2 2>&1 || true
 }
 
 svc_start() {
@@ -899,22 +919,35 @@ setup_subscription() {
   enable_service xray-sub
 
   svc_stop xray-sub
-  svc_start xray-sub || {
-    tail -n 20 "$LOG_DIR/xray-sub.log" >&2 2>/dev/null || true
-    die '订阅服务未能启动'
-  }
+  pkill -f 'busybox httpd' >/dev/null 2>&1 || true
+  sleep 1
 
-  local sub_ok=0 i
-  for i in 1 2 3 4 5; do
-    if curl -fsS --max-time 5 "http://127.0.0.1:${sub_port}/cgi-bin/${token}" -o /dev/null 2>/dev/null; then
-      sub_ok=1; break
-    fi
+  local sub_ok=0 i sub_url="http://127.0.0.1:${sub_port}/cgi-bin/${token}"
+  for i in 1 2 3; do
+    timeout 20 /etc/init.d/xray-sub start >/dev/null 2>&1 || true
+    if wait_http "$sub_url" 5; then sub_ok=1; break; fi
+    warn "第 $i 次：订阅服务启动后 $sub_port 仍无响应"
+    svc_stop xray-sub
     sleep 1
   done
+
   if ((!sub_ok)); then
-    tail -n 20 "$LOG_DIR/xray-sub.log" >&2 2>/dev/null || true
-    ss -lntp 2>/dev/null | awk -v p=":$sub_port" 'NR == 1 || $4 ~ p' >&2 || true
-    die "订阅本地自检失败（127.0.0.1:$sub_port 上没有响应）"
+    warn 'supervise-daemon 没能把订阅服务拉起来，改用 su-exec 直启'
+    svc_stop xray-sub
+    pkill -f 'busybox httpd' >/dev/null 2>&1 || true
+    sleep 1
+    svc_fallback xray-sub >/dev/null 2>&1 || true
+    wait_http "$sub_url" 8 && sub_ok=1
+  fi
+
+  if ((!sub_ok)); then
+    printf '\n--- 诊断：xray-sub 进程 ---\n' >&2
+    ps w 2>/dev/null | awk 'NR == 1 || /[h]ttpd|[x]ray-sub/' >&2 || true
+    printf '\n--- 诊断：监听 %s ---\n' "$sub_port" >&2
+    { ss -lntp 2>/dev/null | awk -v p=":$sub_port" 'NR == 1 || $4 ~ p'; } >&2 || true
+    printf '\n--- 诊断：订阅日志 ---\n' >&2
+    { ls -l "$LOG_DIR/xray-sub.log" 2>/dev/null; tail -n 20 "$LOG_DIR/xray-sub.log" 2>/dev/null; } >&2 || true
+    die "订阅服务起不来（127.0.0.1:$sub_port 无响应）"
   fi
 
   printf '\n%s\n' '============================================================'
@@ -945,11 +978,22 @@ LOG_DIR=/var/log/xray
 SUB_BIN=/usr/local/sbin/xray-sub
 
 svc_running() {
-  local pf="/run/$1.pid" pid
+  local pf="/run/$1.pid" pid state
   [[ -s $pf ]] || return 1
   pid=$(tr -d ' \r\n' < "$pf")
-  [[ -n $pid ]] && kill -0 "$pid" 2>/dev/null
+  [[ -n $pid && -d /proc/$pid ]] || return 1
+  state=$(sed 's/^.*) //' "/proc/$pid/stat" 2>/dev/null | awk '{print $1}')
+  [[ $state == Z ]] && return 1
+  kill -0 "$pid" 2>/dev/null
 }
+
+# 端口是否有人 listening（supervise-daemon 的 pid 永远活着，只能这样判断）
+port_listen() {
+  local port="$1"
+  [[ -n $port ]] || return 1
+  (exec 3<>"/dev/tcp/127.0.0.1/$port") 2>/dev/null
+}
+
 svc_start() {
   /etc/init.d/"$1" start >/dev/null 2>&1 || true
   sleep 2
@@ -967,8 +1011,12 @@ svc_start() {
   sleep 2
   svc_running "$1"
 }
-svc_stop()    { /etc/init.d/"$1" stop    >/dev/null 2>&1 || true; }
-svc_restart() { /etc/init.d/"$1" restart >/dev/null 2>&1 || true; sleep 2; svc_running "$1" || svc_start "$1"; }
+svc_stop()    { timeout 20 /etc/init.d/"$1" stop >/dev/null 2>&1 || true; }
+svc_restart() {
+  timeout 20 /etc/init.d/"$1" restart >/dev/null 2>&1 || true
+  sleep 2
+  svc_running "$1" || svc_start "$1"
+}
 
 sub_url() {
   [[ -f $STATE && -s $SUB_ETC/token ]] || { echo '尚未配置订阅'; return 1; }
@@ -1004,9 +1052,13 @@ show_sub() {
 }
 
 status() {
+  local pid mem lport sport
+  lport=$(jq -er .listen_port "$STATE" 2>/dev/null || true)
+  sport=$(tr -d ' \r\n' < "$SUB_ETC/port" 2>/dev/null || echo '')
+
   echo "--- xray ---"
   svc_running xray && echo '进程：运行中' || echo '进程：未运行'
-  local pid mem
+  if port_listen "$lport"; then echo "端口：$lport 监听中"; else echo "端口：$lport 未监听"; fi
   pid=$(tr -d ' \r\n' < /run/xray.pid 2>/dev/null || true)
   if [[ -n $pid && -r /proc/$pid/status ]]; then
     mem=$(awk '/^VmRSS:/ {print $2}' "/proc/$pid/status")
@@ -1014,8 +1066,9 @@ status() {
   fi
   echo "--- 订阅 ---"
   svc_running xray-sub && echo '进程：运行中' || echo '进程：未运行'
+  if port_listen "$sport"; then echo "端口：$sport 监听中"; else echo "端口：$sport 未监听"; fi
   echo "--- 监听 ---"
-  ss -lntp 2>/dev/null | awk 'NR==1 || /xray|busybox/' || ss -lnt
+  { ss -lntp 2>/dev/null || ss -lnt; } | awk 'NR==1 || /xray|busybox/'
   echo "--- 内存 ---"
   free -m 2>/dev/null || awk '/MemTotal|MemAvailable/ {print}' /proc/meminfo
   echo "--- 磁盘 ---"
@@ -1030,7 +1083,15 @@ check_config() {
 
 restart() {
   if ! check_config; then echo '配置检查失败，未重启'; return 1; fi
-  if svc_restart xray; then echo '已重启，进程正常'; else echo '重启失败，请看日志'; return 1; fi
+  local lport
+  lport=$(jq -er .listen_port "$STATE" 2>/dev/null || true)
+  if svc_restart xray && port_listen "$lport"; then
+    echo "已重启，$lport 正常监听"
+  else
+    echo "重启后 $lport 没有监听，下面是日志末尾："
+    tail -n 20 "$LOG_DIR/xray.log" 2>/dev/null || true
+    return 1
+  fi
 }
 
 set_quota() {
@@ -1284,17 +1345,31 @@ do_install() {
 
   step "6/7 启动代理"
   svc_stop xray
+  pkill -f '/usr/local/bin/xray run' >/dev/null 2>&1 || true
+  sleep 1
+
+  # 注意：用了 supervise-daemon 时，pid 文件里是"监督进程"的 pid，它永远活着，
+  # 所以判断服务是否真的起来只能看端口，不能看 pid。
   local attempt ok=0
   for attempt in 1 2 3; do
-    svc_start xray && { ok=1; break; }
-    warn "启动失败（第 $attempt 次），2 秒后重试"
+    timeout 20 /etc/init.d/xray start >/dev/null 2>&1 || true
+    if wait_listen "$LISTEN_PORT" 10; then ok=1; break; fi
+    warn "第 $attempt 次：OpenRC 启动后 127.0.0.1:$LISTEN_PORT 仍无监听"
+    svc_stop xray
     sync; sleep 2
   done
-  ((ok)) || { tail -n 20 "$LOG_DIR/xray.log" >&2 2>/dev/null || true; die 'Xray 未能启动'; }
 
-  if ! wait_listen "$LISTEN_PORT" 15; then
+  if ((!ok)); then
+    warn 'supervise-daemon 没能把 xray 拉起来，改用 su-exec 直启'
+    svc_stop xray
+    pkill -f '/usr/local/bin/xray run' >/dev/null 2>&1 || true
+    sleep 1
+    if svc_fallback xray && wait_listen "$LISTEN_PORT" 10; then ok=1; fi
+  fi
+
+  if ((!ok)); then
     diag_listen "$LISTEN_PORT"
-    die "进程在跑，但 127.0.0.1:$LISTEN_PORT 连不上（端口没监听或被别的程序占了）"
+    die "127.0.0.1:$LISTEN_PORT 起不来，请看上面最后一段「前台直接跑一次」的报错"
   fi
   info "已在 127.0.0.1:$LISTEN_PORT 监听"
 
