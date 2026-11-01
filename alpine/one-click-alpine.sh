@@ -21,7 +21,7 @@
 set -Eeuo pipefail
 umask 077
 
-SCRIPT_VERSION="2026.11.01-alpine4"
+SCRIPT_VERSION="2026.11.01-alpine5"
 HAVE_SUPERVISOR=0
 
 # 与 Debian 版一致的、已随 FlClash/mihomo 验证过的版本组合
@@ -124,7 +124,8 @@ diag_listen() {  # diag_listen <port>
 
 svc_start() {
   local name="$1"
-  /etc/init.d/"$name" start >/dev/null 2>&1 || true
+  # openrc 在容器里缺状态目录时，init 脚本可能永远不返回；必须限时，否则整条安装静默挂死
+  timeout 20 /etc/init.d/"$name" start >/dev/null 2>&1 || true
   sleep 2
   svc_running "$name" && return 0
   svc_fallback "$name"
@@ -149,10 +150,10 @@ svc_fallback() {
   svc_running "$name"
 }
 
-svc_stop() { /etc/init.d/"$1" stop >/dev/null 2>&1 || true; sleep 1; }
+svc_stop() { timeout 20 /etc/init.d/"$1" stop >/dev/null 2>&1 || true; sleep 1; }
 
 svc_restart() {
-  /etc/init.d/"$1" restart >/dev/null 2>&1 || true
+  timeout 20 /etc/init.d/"$1" restart >/dev/null 2>&1 || true
   sleep 2
   svc_running "$1" && return 0
   svc_start "$1"
@@ -402,14 +403,20 @@ preflight() {
 # 依赖
 # ---------------------------------------------------------------------------
 install_deps() {
-  local need=() pkg
+  local need=() pkg apklog=/var/tmp/xray-apk.log
   for pkg in curl openssl unzip jq ca-certificates iproute2 procps openrc su-exec; do
     apk info -e "$pkg" >/dev/null 2>&1 || need+=("$pkg")
   done
   if ((${#need[@]})) || ! command -v supervise-daemon >/dev/null 2>&1; then
     step "apk 安装依赖：${need[*]:-openrc}"
-    apk add --no-cache --no-progress "${need[@]:-openrc}" >/dev/null 2>&1 \
-      || die 'apk add 失败，检查 /etc/apk/repositories 与网络'
+    # stdin 接 /dev/null：apk 万一要人确认会立刻拿到 EOF 而不是无限等待
+    # 输出写文件再回显：失败时能看到真实原因，而不是一句"失败了"
+    if ! timeout 300 apk add --no-cache --no-progress "${need[@]:-openrc}" \
+           </dev/null >"$apklog" 2>&1; then
+      printf '\n--- apk 输出末 20 行 ---\n' >&2
+      tail -n 20 "$apklog" >&2 2>/dev/null || true
+      die 'apk add 失败（上面是 apk 的原始输出），检查 /etc/apk/repositories 与网络'
+    fi
   fi
   for pkg in curl openssl unzip jq sha256sum timeout getent ss; do
     command -v "$pkg" >/dev/null 2>&1 || die "缺少命令：$pkg"
@@ -497,6 +504,7 @@ download_release() {
     done
 
     local ok=0
+    info "开始下载（单源低于 1KB/s 或超过 10 分钟会被放弃，自动换下一个源）"
     for url in "${tries[@]}"; do
       rm -f "$out"
       if ! curl -fsSL --retry 3 --retry-delay 2 --retry-all-errors \
