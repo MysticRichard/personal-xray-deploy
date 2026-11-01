@@ -21,7 +21,7 @@
 set -Eeuo pipefail
 umask 077
 
-SCRIPT_VERSION="2026.11.01-alpine6"
+SCRIPT_VERSION="2026.11.01-alpine7"
 HAVE_SUPERVISOR=0
 
 # 与 Debian 版一致的、已随 FlClash/mihomo 验证过的版本组合
@@ -132,14 +132,21 @@ diag_listen() {  # diag_listen <port>
   printf '\n--- 诊断：配置文件里的 port ---\n' >&2
   { grep -m1 '"port"' "$CONFIG" 2>/dev/null; } >&2 || true
 
+  printf '\n--- 诊断：权限 ---\n' >&2
+  { ls -ld /usr/local/etc/xray "$CONFIG" 2>/dev/null; } >&2 || true
+
   printf '\n--- 诊断：日志文件 ---\n' >&2
   { ls -l "$LOG_DIR/xray.log" 2>/dev/null; } >&2 || printf '(日志文件不存在)\n' >&2
 
   printf '\n--- 诊断：日志末尾 ---\n' >&2
   { tail -n 30 "$LOG_DIR/xray.log" 2>/dev/null; } >&2 || true
 
-  printf '\n--- 诊断：前台直接跑一次（看真实报错）---\n' >&2
-  { XRAY_LOCATION_ASSET="$ASSETS" timeout 5 "$BIN" run -config "$CONFIG"; } >&2 2>&1 || true
+  printf '\n--- 诊断：以 xray 身份前台跑一次（看真实报错）---\n' >&2
+  if command -v su-exec >/dev/null 2>&1; then
+    { XRAY_LOCATION_ASSET="$ASSETS" timeout 5 su-exec xray "$BIN" run -config "$CONFIG"; } >&2 2>&1 || true
+  else
+    { XRAY_LOCATION_ASSET="$ASSETS" timeout 5 "$BIN" run -config "$CONFIG"; } >&2 2>&1 || true
+  fi
 }
 
 svc_start() {
@@ -1321,6 +1328,9 @@ do_install() {
   ensure_user xray
   ensure_user xray-sub
   mkd /usr/local/etc/xray 750
+  # 关键：目录必须让 xray 组可进入，否则 xray 用户连 config.json 都打不开
+  # （只给文件 640 是不够的，缺了目录的 x 位就是 permission denied）
+  chown root:xray /usr/local/etc/xray 2>/dev/null || true
   mkd "$LOG_DIR" 755
   chown -R xray:xray "$LOG_DIR" 2>/dev/null || true
   write_launchers "$SUB_LISTEN_PORT"
@@ -1328,6 +1338,12 @@ do_install() {
   putf "$stage/core/xray" "$BIN" 755
   putf "$stage/config.json" "$CONFIG" 640
   chown root:xray "$CONFIG" 2>/dev/null || true
+
+  # 用真实身份试读一次，权限不对当场就失败，而不是等到启动才报错
+  if command -v su-exec >/dev/null 2>&1; then
+    su-exec xray test -r "$CONFIG" 2>/dev/null \
+      || die "xray 用户读不到 $CONFIG（检查 /usr/local/etc/xray 的属组与权限）"
+  fi
 
   jq -n --arg uuid "$CLIENT_UUID" --arg private_key "$PRIVATE_KEY" \
         --arg public_key "$PUBLIC_KEY" --arg short_id "$SHORT_ID" \
