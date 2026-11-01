@@ -31,7 +31,7 @@
 | 容器内启动 | 依赖 systemd 存在 | 自动识别容器，`/etc/local.d/` + `rc-update` 双兜底 |
 | 日志 | journald | `/var/log/xray/xray.log`（由启动器重定向） |
 | 二进制 | Xray 静态 Go 版 | 同一个包，校验和一致（musl 下同样能跑，已验证无 `.interp`） |
-| geoip.dat | 必装（18.5MB） | **默认不装**，用内置 `geoip:private` + 显式私网 CIDR；`--with-geo` 才启用 `geoip:cn` 阻断 |
+| geoip.dat | 必装（18.5MB） | **默认不装**，私网段直接写死成 CIDR（不用 `geoip:private`，它同样要读 geoip.dat）；`--with-geo` 才装文件并启用 `geoip:cn` 阻断 |
 | 内存 | GOMEMLIMIT=48MiB | 同上，128MB 机器实测够用 |
 | 订阅服务 | busybox httpd + systemd | busybox httpd + OpenRC，同一套 CGI/令牌/额度头 |
 | 订阅规则 | 298KB 的 `rules.template.yaml` | 内置 7 条精简规则；需要时 `/etc/xray-sub/rules.yaml` 覆盖 |

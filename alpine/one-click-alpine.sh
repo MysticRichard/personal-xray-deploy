@@ -21,7 +21,7 @@
 set -Eeuo pipefail
 umask 077
 
-SCRIPT_VERSION="2026.11.01-alpine2"
+SCRIPT_VERSION="2026.11.01-alpine3"
 HAVE_SUPERVISOR=0
 
 # 与 Debian 版一致的、已随 FlClash/mihomo 验证过的版本组合
@@ -469,8 +469,10 @@ download_release() {
 # ---------------------------------------------------------------------------
 render_config() {
   local out="$1" ips
-  # geoip:private 是内置关键字，不需要 geoip.dat；geoip:cn 需要数据文件
-  ips='"geoip:private","0.0.0.0/8","100.64.0.0/10","127.0.0.0/8","169.254.0.0/16","172.16.0.0/12","192.168.0.0/16","224.0.0.0/4","240.0.0.0/4","::1/128","fc00::/7","fe80::/10","ff00::/8"'
+  # 不要用 "geoip:private"：Xray v26 里它同样要去读 geoip.dat，而默认不装这个文件，
+  # 配置校验会直接报 "illegal ip rule: geoip:private / failed to open geoip.dat"。
+  # 这里改成把私网段写死，效果一样，且不依赖任何数据文件。
+  ips='"0.0.0.0/8","10.0.0.0/8","100.64.0.0/10","127.0.0.0/8","169.254.0.0/16","172.16.0.0/12","192.168.0.0/16","224.0.0.0/4","240.0.0.0/4","::1/128","fc00::/7","fe80::/10","ff00::/8"'
   if ((WITH_GEO)) && [[ -s $ASSETS/geoip.dat ]]; then
     ips="\"geoip:cn\",$ips"
   fi
@@ -1182,8 +1184,11 @@ do_install() {
     putf "$stage/core/geoip.dat" "$ASSETS/geoip.dat" 644
   fi
   render_config "$stage/config.json"
-  XRAY_LOCATION_ASSET="$stage/core" "$stage/core/xray" run -test -config "$stage/config.json" \
-    || die '配置校验失败'
+  local cfgtest
+  if ! cfgtest=$(XRAY_LOCATION_ASSET="$stage/core" "$stage/core/xray" run -test -config "$stage/config.json" 2>&1); then
+    printf '%s\n' "$cfgtest" >&2
+    die '配置校验失败（上面是 Xray 的原始报错）'
+  fi
 
   step "5/7 安装文件"
   ensure_user xray
