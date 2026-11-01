@@ -21,8 +21,10 @@
 set -Eeuo pipefail
 umask 077
 
-SCRIPT_VERSION="2026.11.01-alpine9"
+SCRIPT_VERSION="2026.11.01-alpine10"
 HAVE_SUPERVISOR=0
+# 监听端口 < 1024 时，普通用户没权限绑定；这里会在安装时决定用哪个身份跑 xray
+SERVICE_USER="xray:xray"
 
 # 与 Debian 版一致的、已随 FlClash/mihomo 验证过的版本组合
 XRAY_VERSION="v26.6.27"
@@ -158,9 +160,9 @@ diag_listen() {  # diag_listen <port>
   printf '\n--- 诊断：日志末尾 ---\n' >&2
   { tail -n 30 "$LOG_DIR/xray.log" 2>/dev/null; } >&2 || true
 
-  printf '\n--- 诊断：以 xray 身份前台跑一次（看真实报错）---\n' >&2
-  if command -v su-exec >/dev/null 2>&1; then
-    { XRAY_LOCATION_ASSET="$ASSETS" timeout 5 su-exec xray "$BIN" run -config "$CONFIG"; } >&2 2>&1 || true
+  printf '\n--- 诊断：以 %s 身份前台跑一次（看真实报错）---\n' "$SERVICE_USER" >&2
+  if command -v su-exec >/dev/null 2>&1 && [[ $SERVICE_USER != root:* ]]; then
+    { XRAY_LOCATION_ASSET="$ASSETS" timeout 5 su-exec "$SERVICE_USER" "$BIN" run -config "$CONFIG"; } >&2 2>&1 || true
   else
     { XRAY_LOCATION_ASSET="$ASSETS" timeout 5 "$BIN" run -config "$CONFIG"; } >&2 2>&1 || true
   fi
@@ -179,7 +181,7 @@ svc_start() {
 svc_fallback() {
   local name="$1" user cmd
   case "$name" in
-    xray)     user="xray:xray";         cmd=/usr/local/sbin/xray-run.sh ;;
+    xray)     user="$SERVICE_USER";     cmd=/usr/local/sbin/xray-run.sh ;;
     xray-sub) user="xray-sub:xray-sub"; cmd=/usr/local/sbin/xray-sub-run.sh ;;
     *) return 1 ;;
   esac
@@ -653,6 +655,29 @@ ensure_user() {  # ensure_user <name>
 # ---------------------------------------------------------------------------
 # OpenRC 服务脚本
 # ---------------------------------------------------------------------------
+# 监听 <1024 的端口必须有 CAP_NET_BIND_SERVICE。降权后的 xray 用户没有，
+# 于是日志里就是 "listen tcp 0.0.0.0:443: bind: permission denied"。
+# 这里优先用 setcap 保留降权；做不到就退回 root（容器本身就是边界）。
+pick_service_user() {
+  local port="$1" capok=0
+  SERVICE_USER="xray:xray"
+  ((10#$port >= 1024)) && return 0
+
+  if ! command -v setcap >/dev/null 2>&1; then
+    timeout 120 apk add --no-cache --no-progress libcap </dev/null >/dev/null 2>&1 || true
+  fi
+  if command -v setcap >/dev/null 2>&1 && [[ -x $BIN ]]; then
+    setcap cap_net_bind_service=+ep "$BIN" >/dev/null 2>&1 && capok=1
+  fi
+  if ((capok)) && su-exec xray test -x "$BIN" 2>/dev/null; then
+    info "已用 setcap 授予 xray 绑定 $port 的权限"
+    return 0
+  fi
+  warn "xray 用户无法绑定 $port（<1024，缺 CAP_NET_BIND_SERVICE）"
+  warn "改为以 root 运行 xray；容器本身就是隔离边界，功能不受影响"
+  SERVICE_USER="root:root"
+}
+
 write_launchers() {
   local sub_port="$1"
   mkdir -p /usr/local/sbin
@@ -683,7 +708,7 @@ write_xray_init() {
     printf '%s\n' '#!/sbin/openrc-run'
     printf '%s\n' 'description="Personal Xray node (VLESS + REALITY)"'
     printf '%s\n' 'command="/usr/local/sbin/xray-run.sh"'
-    printf '%s\n' 'command_user="xray:xray"'
+    printf 'command_user="%s"\n' "$SERVICE_USER"
     printf '%s\n' 'pidfile="/run/xray.pid"'
     if ((HAVE_SUPERVISOR)); then
       printf '%s\n' 'supervisor="supervise-daemon"'
@@ -1021,6 +1046,13 @@ STATE=/usr/local/etc/xray/client.json
 SUB_ETC=/etc/xray-sub
 LOG_DIR=/var/log/xray
 SUB_BIN=/usr/local/sbin/xray-sub
+RUN_USER_FILE=/usr/local/etc/xray/run_user
+
+run_user() {
+  local u
+  u=$(tr -d ' \r\n' < "$RUN_USER_FILE" 2>/dev/null || true)
+  printf '%s\n' "${u:-xray:xray}"
+}
 
 svc_running() {
   local pf="/run/$1.pid" pid state
@@ -1045,7 +1077,7 @@ svc_start() {
   svc_running "$1" && return 0
   local user cmd
   case "$1" in
-    xray)     user="xray:xray";         cmd=/usr/local/sbin/xray-run.sh ;;
+    xray)     user="$(run_user)";       cmd=/usr/local/sbin/xray-run.sh ;;
     xray-sub) user="xray-sub:xray-sub"; cmd=/usr/local/sbin/xray-sub-run.sh ;;
     *) return 1 ;;
   esac
@@ -1103,6 +1135,7 @@ status() {
 
   echo "--- xray ---"
   svc_running xray && echo '进程：运行中' || echo '进程：未运行'
+  echo "运行身份：$(run_user)"
   if port_listen "$lport"; then echo "端口：$lport 监听中"; else echo "端口：$lport 未监听"; fi
   pid=$(tr -d ' \r\n' < /run/xray.pid 2>/dev/null || true)
   if [[ -n $pid && -r /proc/$pid/status ]]; then
@@ -1406,6 +1439,10 @@ do_install() {
           reality_dest:$reality_dest}' > "$stage/client.json"
   putf "$stage/client.json" "$STATE" 600
 
+  pick_service_user "$LISTEN_PORT"
+  printf '%s\n' "$SERVICE_USER" > /usr/local/etc/xray/run_user
+  chmod 644 /usr/local/etc/xray/run_user
+
   write_xray_init
   enable_service xray
   install_admin
@@ -1436,6 +1473,11 @@ do_install() {
 
   if ((!ok)); then
     diag_listen "$LISTEN_PORT"
+    if ((10#$LISTEN_PORT < 1024)); then
+      printf '\n提示：%s 是 1024 以下的端口。如果上面报的是 "bind: permission denied"，\n' "$LISTEN_PORT" >&2
+      printf '说明这层容器不允许绑定低端口（连 root 也可能不行）。\n' >&2
+      printf '办法：把平台映射的「内部端口」改成 >=1024（例如 22222），再重跑并加 --listen-port 22222。\n' >&2
+    fi
     die "127.0.0.1:$LISTEN_PORT 起不来，请看上面最后一段「前台直接跑一次」的报错"
   fi
   info "已在 127.0.0.1:$LISTEN_PORT 监听"
