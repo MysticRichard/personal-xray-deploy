@@ -10,15 +10,15 @@
 bash <(curl -fsSL https://raw.githubusercontent.com/MysticRichard/personal-xray-deploy/main/one-click.sh)
 ```
 
-交互会依次询问十项：
+交互会依次询问十项，但**通常只需填三项**（公网地址、代理端口、订阅端口），其余按回车用默认值：
 
 1. 公网 IP 或域名
 2. 代理公网 TCP 端口
-3. 代理内部 TCP 端口
+3. 代理内部 TCP 端口（回车=与公网端口相同）
 4. REALITY 目标（默认 `www.apple.com:443`）
 5. REALITY serverName（默认跟随目标）
 6. 订阅公网 TCP 端口
-7. 订阅内部 TCP 端口（须 ≥1024）
+7. 订阅内部 TCP 端口（回车=2096，须 ≥1024）
 8. 月流量（`100GB` / `1TB` / `0`=不限，按 1024 进制）
 9. 流量重置日（`1`～`31`，`0`=无固定重置日）
 10. 套餐到期日（`YYYY-MM-DD`，`0`=长期有效）
@@ -87,6 +87,21 @@ xray-admin --plan
 ```
 
 显示月流量、重置日和到期日。月流量/到期日首次安装会写入订阅额度头；`upload=0; download=0` 是占位，不是真实已用量。重置日没有标准客户端字段，只在 `xray-admin --plan` 展示。
+
+## 依赖安装被 Killed（内存不足）
+
+装依赖时出现：
+
+```text
+/dev/fd/63: line N:  PID Killed   apt-get install -y ...
+```
+
+说明 apt 被 SIGKILL（通常是 OOM），不是网络或配置问题。当前版本会逐包安装并在失败时打印内存上限、swap、磁盘与 OOM 记录。处置：
+
+- 先重跑同一条命令即可：上次可能只差触发器阶段，重跑会跳过已装好的包。
+- 容器机型（`systemd-detect-virt` 显示 `lxc`/`openvz`）无法自行加 swap，只能让供应商临时把内存提到 512 MB。
+- 物理机/KVM 可临时加 256 MB swap 后重跑。
+- 根分区不足 150 MB 时脚本会直接停下并提示，这是保护，不要绕过。
 
 ## GitHub 下载超时 / 断点续传
 

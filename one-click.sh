@@ -3,7 +3,7 @@
 set -Eeuo pipefail
 set +x
 umask 077
-SCRIPT_VERSION=2026.10.30-review2
+SCRIPT_VERSION=2026.11.03-review3
 printf '个人 Xray 安装脚本 %s\n' "$SCRIPT_VERSION"
 [[ $EUID -eq 0 ]] || { echo '请使用 root 运行'; exit 1; }
 [[ -f /etc/debian_version && -d /run/systemd/system ]] || { echo '需要 Debian + systemd'; exit 1; }
@@ -13,11 +13,69 @@ missing=0
 for tool in curl openssl unzip jq ss free sha256sum timeout busybox nano; do
   command -v "$tool" >/dev/null || missing=1
 done
+
+# --- dependency install (begin) ---
+# 容器里 /proc/meminfo 可能显示宿主机数值，优先读 cgroup 限额。
+dep_memory_mb() {
+  local f v
+  for f in /sys/fs/cgroup/memory.max /sys/fs/cgroup/memory/memory.limit_in_bytes; do
+    [[ -r $f ]] || continue
+    v=$(cat "$f" 2>/dev/null) || continue
+    [[ $v =~ ^[0-9]+$ ]] || continue
+    if (( v > 0 && v < 1099511627776 )); then
+      echo $(( v / 1024 / 1024 ))
+      return 0
+    fi
+  done
+  awk '/^MemTotal:/ {print int($2/1024)}' /proc/meminfo
+}
+
+# 依赖装不上时，把判断依据一次说清楚，而不是只留一个 Killed。
+dep_fail_report() {
+  local virt
+  virt=$(systemd-detect-virt 2>/dev/null || echo unknown)
+  echo '依赖安装未完成；未写入任何节点配置，可原地重试，不要重置服务器。'
+  echo "内存上限 $(dep_memory_mb) MB，swap $(awk '/^SwapTotal:/ {print int($2/1024)}' /proc/meminfo) MB"
+  df -h / 2>/dev/null || true
+  (dmesg -T 2>/dev/null || journalctl -k --no-pager 2>/dev/null || true) \
+    | grep -iE 'out of memory|oom-kill|killed process' | tail -5 || true
+  echo "虚拟化: $virt"
+  case $virt in
+    lxc|openvz|docker|podman)
+      echo '提示：容器内无法自行加 swap。请让供应商把内存临时提到 512 MB，再重跑同一条命令。' ;;
+    *)
+      echo '提示：可临时加 256 MB swap，或提升内存后重跑同一条命令。' ;;
+  esac
+}
+
 if ((missing)) || [[ ! -s /etc/ssl/certs/ca-certificates.crt ]]; then
   export DEBIAN_FRONTEND=noninteractive
-  apt-get update -o Acquire::Retries=2 -o Acquire::http::Timeout=20 -o Acquire::https::Timeout=20
-  apt-get install -y --no-install-recommends -o DPkg::Lock::Timeout=60 ca-certificates curl openssl unzip jq iproute2 procps busybox nano
+  # 1 GB 盘上 apt 缓存很容易把根分区写满，先回收再判断。
+  apt-get clean >/dev/null 2>&1 || true
+  avail_kb=$(df -Pk / | awk 'NR==2 {print $4}')
+  if (( avail_kb < 153600 )); then
+    echo "根分区可用 $((avail_kb / 1024)) MB，不足 150 MB，装不下依赖和 21 MB 发行包。" >&2
+    echo '先清理空间（apt-get clean、journalctl --vacuum-size=16M）或扩容磁盘，然后重跑同一条命令。' >&2
+    exit 1
+  fi
+  if (( $(dep_memory_mb) < 192 )) && (( $(awk '/^SwapTotal:/ {print $2}' /proc/meminfo) < 65536 )); then
+    echo "提示：内存约 $(dep_memory_mb) MB 且无 swap，将逐个安装依赖以降低峰值；若仍被 Killed 需要提升内存。"
+  fi
+  # 上次被中断时可能停在触发器阶段，先补完再装。
+  dpkg --configure -a || true
+  apt-get update -o Acquire::Retries=2 -o Acquire::http::Timeout=20 -o Acquire::https::Timeout=20 \
+    || { dep_fail_report; exit 1; }
+  # 一次只装一个：apt+dpkg 的峰值内存随同批包数量上升，128 MB 机器上一批装九个会被 OOM 杀掉。
+  for pkg in ca-certificates curl openssl unzip jq iproute2 procps busybox nano; do
+    if dpkg -s "$pkg" 2>/dev/null | grep -q '^Status: install ok installed'; then
+      continue
+    fi
+    apt-get install -y --no-install-recommends -o DPkg::Lock::Timeout=60 -o Dpkg::Use-Pty=0 "$pkg" \
+      || { dep_fail_report; exit 1; }
+    apt-get clean >/dev/null 2>&1 || true
+  done
 fi
+# --- dependency install (end) ---
 for tool in curl openssl unzip jq ss free sha256sum timeout busybox nano; do
   command -v "$tool" >/dev/null || { echo "缺少依赖：$tool" >&2; exit 1; }
 done
@@ -122,13 +180,13 @@ ask() {
 }
 ask SERVER_ADDRESS 'VPS 公网 IP 或域名' "${SERVER_ADDRESS:-}"
 ask PUBLIC_PORT '代理公网 TCP 端口' "${PUBLIC_PORT:-}"
-ask LISTEN_PORT '代理内部 TCP 端口（无 NAT 时与公网相同）' "${LISTEN_PORT:-}"
+ask LISTEN_PORT '代理内部 TCP 端口（回车=与公网相同）' "${LISTEN_PORT:-${PUBLIC_PORT:-}}"
 ask REALITY_DEST 'REALITY 目标 host:port（默认值并不保证防封，安装时会校验）' "${REALITY_DEST:-www.apple.com:443}"
 # A custom target should not silently retain the Microsoft SNI.
 default_sni=${REALITY_DEST%:*}
 ask REALITY_SERVER_NAME 'REALITY serverName' "$default_sni"
 ask SUB_PUBLIC_PORT '订阅公网 TCP 端口（平台外部端口，可任意）' "${SUB_PUBLIC_PORT:-}"
-ask SUB_LISTEN_PORT '订阅内部 TCP 端口（须 ≥1024；无 NAT 时与公网相同）' "${SUB_LISTEN_PORT:-}"
+ask SUB_LISTEN_PORT '订阅内部 TCP 端口（回车=2096，须 ≥1024）' "${SUB_LISTEN_PORT:-2096}"
 ask PLAN_TOTAL '月流量（示例 100GB / 1TB / 0=不限，1024 进制）' "${PLAN_TOTAL:-0}"
 ask PLAN_RESET_DAY '流量重置日（1-31，0=无固定重置日）' "${PLAN_RESET_DAY:-0}"
 ask PLAN_EXPIRE '套餐到期日（YYYY-MM-DD，0=长期有效）' "${PLAN_EXPIRE:-0}"
